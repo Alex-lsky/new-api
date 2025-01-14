@@ -1,16 +1,12 @@
 package aws
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
 	"io"
 	"net/http"
 	"one-api/common"
 	relaymodel "one-api/dto"
-	"one-api/relay/channel/claude"
 	relaycommon "one-api/relay/common"
 	"one-api/service"
 	"strings"
@@ -20,6 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	"github.com/gin-gonic/gin"
+	"github.com/pkg/errors"
 )
 
 func newAwsClient(c *gin.Context, info *relaycommon.RelayInfo) (*bedrockruntime.Client, error) {
@@ -47,62 +45,74 @@ func wrapErr(err error) *relaymodel.OpenAIErrorWithStatusCode {
 	}
 }
 
-func awsModelID(requestModel string) (string, error) {
-	if awsModelID, ok := awsModelIDMap[requestModel]; ok {
-		return awsModelID, nil
-	}
-
-	return requestModel, nil
-}
-
 func awsHandler(c *gin.Context, info *relaycommon.RelayInfo, requestMode int) (*relaymodel.OpenAIErrorWithStatusCode, *relaymodel.Usage) {
 	awsCli, err := newAwsClient(c, info)
 	if err != nil {
 		return wrapErr(errors.Wrap(err, "newAwsClient")), nil
 	}
 
-	awsModelId, err := awsModelID(c.GetString("request_model"))
-	if err != nil {
-		return wrapErr(errors.Wrap(err, "awsModelID")), nil
-	}
-
-	awsReq := &bedrockruntime.InvokeModelInput{
-		ModelId:     aws.String(awsModelId),
-		Accept:      aws.String("application/json"),
-		ContentType: aws.String("application/json"),
-	}
-
-	claudeReq_, ok := c.Get("converted_request")
+	bedrockReq, ok := c.Get("bedrock_request")
 	if !ok {
 		return wrapErr(errors.New("request not found")), nil
 	}
-	claudeReq := claudeReq_.(*claude.ClaudeRequest)
-	awsClaudeReq := copyRequest(claudeReq)
-	awsReq.Body, err = json.Marshal(awsClaudeReq)
+	req := bedrockReq.(*BedrockRequest)
+
+	// 构建请求体
+	requestBody := map[string]interface{}{
+		"messages":    req.Messages,
+		"max_tokens":  req.MaxTokens,
+		"temperature": req.Temperature,
+		"top_p":       req.TopP,
+		"top_k":       req.TopK,
+	}
+
+	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return wrapErr(errors.Wrap(err, "marshal request")), nil
 	}
 
-	awsResp, err := awsCli.InvokeModel(c.Request.Context(), awsReq)
+	// 调用Bedrock API
+	output, err := awsCli.InvokeModel(c.Request.Context(), &bedrockruntime.InvokeModelInput{
+		ModelId:     aws.String(req.ModelId),
+		Body:        bodyBytes,
+		ContentType: aws.String("application/json"),
+		Accept:      aws.String("application/json"),
+	})
 	if err != nil {
 		return wrapErr(errors.Wrap(err, "InvokeModel")), nil
 	}
 
-	claudeResponse := new(claude.ClaudeResponse)
-	err = json.Unmarshal(awsResp.Body, claudeResponse)
-	if err != nil {
+	// 解析响应
+	var bedrockResp BedrockResponse
+	if err := json.Unmarshal(output.Body, &bedrockResp); err != nil {
 		return wrapErr(errors.Wrap(err, "unmarshal response")), nil
 	}
 
-	openaiResp := claude.ResponseClaude2OpenAI(requestMode, claudeResponse)
-	usage := relaymodel.Usage{
-		PromptTokens:     claudeResponse.Usage.InputTokens,
-		CompletionTokens: claudeResponse.Usage.OutputTokens,
-		TotalTokens:      claudeResponse.Usage.InputTokens + claudeResponse.Usage.OutputTokens,
+	response := &relaymodel.OpenAITextResponse{
+		Id:      fmt.Sprintf("aws-%s", bedrockResp.RequestId),
+		Object:  "chat.completion",
+		Created: common.GetTimestamp(),
+		Model:   req.ModelId,
+		Choices: []relaymodel.OpenAITextResponseChoice{
+			{
+				Index: 0,
+				Message: relaymodel.Message{
+					Role: bedrockResp.Message.Role,
+				},
+				FinishReason: "stop",
+			},
+		},
 	}
-	openaiResp.Usage = usage
+	response.Choices[0].Message.SetStringContent(bedrockResp.Message.Content)
 
-	c.JSON(http.StatusOK, openaiResp)
+	usage := relaymodel.Usage{
+		PromptTokens:     bedrockResp.Usage.InputTokens,
+		CompletionTokens: bedrockResp.Usage.OutputTokens,
+		TotalTokens:      bedrockResp.Usage.TotalTokens,
+	}
+	response.Usage = usage
+
+	c.JSON(http.StatusOK, response)
 	return nil, &usage
 }
 
@@ -112,98 +122,102 @@ func awsStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 		return wrapErr(errors.Wrap(err, "newAwsClient")), nil
 	}
 
-	awsModelId, err := awsModelID(c.GetString("request_model"))
-	if err != nil {
-		return wrapErr(errors.Wrap(err, "awsModelID")), nil
-	}
-
-	awsReq := &bedrockruntime.InvokeModelWithResponseStreamInput{
-		ModelId:     aws.String(awsModelId),
-		Accept:      aws.String("application/json"),
-		ContentType: aws.String("application/json"),
-	}
-
-	claudeReq_, ok := c.Get("converted_request")
+	bedrockReq, ok := c.Get("bedrock_request")
 	if !ok {
 		return wrapErr(errors.New("request not found")), nil
 	}
-	claudeReq := claudeReq_.(*claude.ClaudeRequest)
+	req := bedrockReq.(*BedrockRequest)
 
-	awsClaudeReq := copyRequest(claudeReq)
-	awsReq.Body, err = json.Marshal(awsClaudeReq)
+	// 构建请求体
+	requestBody := map[string]interface{}{
+		"messages":    req.Messages,
+		"max_tokens":  req.MaxTokens,
+		"temperature": req.Temperature,
+		"top_p":       req.TopP,
+		"top_k":       req.TopK,
+		"stream":      true,
+	}
+
+	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return wrapErr(errors.Wrap(err, "marshal request")), nil
 	}
 
-	awsResp, err := awsCli.InvokeModelWithResponseStream(c.Request.Context(), awsReq)
+	// 调用Bedrock流式API
+	output, err := awsCli.InvokeModelWithResponseStream(c.Request.Context(), &bedrockruntime.InvokeModelWithResponseStreamInput{
+		ModelId:     aws.String(req.ModelId),
+		Body:        bodyBytes,
+		ContentType: aws.String("application/json"),
+		Accept:      aws.String("application/json"),
+	})
 	if err != nil {
 		return wrapErr(errors.Wrap(err, "InvokeModelWithResponseStream")), nil
 	}
-	stream := awsResp.GetStream()
-	defer stream.Close()
 
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	var usage relaymodel.Usage
-	var id string
-	var model string
-	isFirst := true
 	createdTime := common.GetTimestamp()
+	isFirst := true
+
+	stream := output.GetStream()
+	defer stream.Close()
+
 	c.Stream(func(w io.Writer) bool {
 		event, ok := <-stream.Events()
 		if !ok {
 			return false
 		}
 
-		switch v := event.(type) {
-		case *types.ResponseStreamMemberChunk:
-			if isFirst {
-				isFirst = false
-				info.FirstResponseTime = time.Now()
-			}
-			claudeResp := new(claude.ClaudeResponse)
-			err := json.NewDecoder(bytes.NewReader(v.Value.Bytes)).Decode(claudeResp)
-			if err != nil {
-				common.SysError("error unmarshalling stream response: " + err.Error())
-				return false
-			}
-
-			response, claudeUsage := claude.StreamResponseClaude2OpenAI(requestMode, claudeResp)
-			if claudeUsage != nil {
-				usage.PromptTokens += claudeUsage.InputTokens
-				usage.CompletionTokens += claudeUsage.OutputTokens
-			}
-
-			if response == nil {
-				return true
-			}
-
-			if response.Id != "" {
-				id = response.Id
-			}
-			if response.Model != "" {
-				model = response.Model
-			}
-			response.Created = createdTime
-			response.Id = id
-			response.Model = model
-
-			jsonStr, err := json.Marshal(response)
-			if err != nil {
-				common.SysError("error marshalling stream response: " + err.Error())
-				return true
-			}
-			c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonStr)})
-			return true
-		case *types.UnknownUnionMember:
-			fmt.Println("unknown tag:", v.Tag)
-			return false
-		default:
-			fmt.Println("union is nil or unknown type")
-			return false
+		if isFirst {
+			isFirst = false
+			info.FirstResponseTime = time.Now()
 		}
+
+		chunk, ok := event.(*types.ResponseStreamMemberChunk)
+		if !ok {
+			return true
+		}
+
+		var bedrockResp BedrockResponse
+		if err := json.Unmarshal(chunk.Value.Bytes, &bedrockResp); err != nil {
+			common.SysError("error unmarshalling stream response: " + err.Error())
+			return true
+		}
+
+		response := &relaymodel.ChatCompletionsStreamResponse{
+			Id:      fmt.Sprintf("aws-%s", bedrockResp.RequestId),
+			Object:  "chat.completion.chunk",
+			Created: createdTime,
+			Model:   req.ModelId,
+			Choices: []relaymodel.ChatCompletionsStreamResponseChoice{
+				{
+					Index: 0,
+					Delta: relaymodel.ChatCompletionsStreamResponseChoiceDelta{
+						Role: bedrockResp.Message.Role,
+					},
+				},
+			},
+		}
+		response.Choices[0].Delta.SetContentString(bedrockResp.Message.Content)
+
+		jsonStr, err := json.Marshal(response)
+		if err != nil {
+			common.SysError("error marshalling stream response: " + err.Error())
+			return true
+		}
+		c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonStr)})
+
+		if bedrockResp.Usage != nil {
+			usage.PromptTokens = bedrockResp.Usage.InputTokens
+			usage.CompletionTokens = bedrockResp.Usage.OutputTokens
+			usage.TotalTokens = bedrockResp.Usage.TotalTokens
+		}
+
+		return true
 	})
+
 	if info.ShouldIncludeUsage {
-		response := service.GenerateFinalUsageResponse(id, createdTime, info.UpstreamModelName, usage)
+		response := service.GenerateFinalUsageResponse(fmt.Sprintf("aws-%d", createdTime), createdTime, info.UpstreamModelName, usage)
 		err := service.ObjectData(c, response)
 		if err != nil {
 			common.SysError("send final response failed: " + err.Error())
