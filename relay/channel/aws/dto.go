@@ -18,6 +18,31 @@ type AwsClaudeRequest struct {
 	ToolChoice       any                    `json:"tool_choice,omitempty"`
 }
 
+type AWSConverseRequest struct {
+	Messages    []AWSConverseMessage `json:"messages"`
+	ModelID     string               `json:"modelId"`
+	Temperature float64              `json:"temperature,omitempty"`
+	TopP        float64              `json:"topP,omitempty"`
+	MaxTokens   int                  `json:"maxTokens,omitempty"`
+}
+
+type AWSConverseResponse struct {
+	Message AWSConverseMessage `json:"message"`
+	Usage   struct {
+		InputTokens  int `json:"inputTokens"`
+		OutputTokens int `json:"outputTokens"`
+	} `json:"usage"`
+}
+
+type AWSConverseMessage struct {
+	Role    string                    `json:"role"`
+	Content []AWSConverseContentBlock `json:"content"`
+}
+
+type AWSConverseContentBlock struct {
+	Text string `json:"text"`
+}
+
 func copyRequest(req *claude.ClaudeRequest) *AwsClaudeRequest {
 	return &AwsClaudeRequest{
 		AnthropicVersion: "bedrock-2023-05-31",

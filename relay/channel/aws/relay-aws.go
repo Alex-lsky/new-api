@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
 	"io"
 	"net/http"
 	"one-api/common"
@@ -15,6 +13,9 @@ import (
 	"one-api/service"
 	"strings"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/pkg/errors"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -66,44 +67,85 @@ func awsHandler(c *gin.Context, info *relaycommon.RelayInfo, requestMode int) (*
 		return wrapErr(errors.Wrap(err, "awsModelID")), nil
 	}
 
-	awsReq := &bedrockruntime.InvokeModelInput{
-		ModelId:     aws.String(awsModelId),
-		Accept:      aws.String("application/json"),
-		ContentType: aws.String("application/json"),
-	}
-
 	claudeReq_, ok := c.Get("converted_request")
 	if !ok {
 		return wrapErr(errors.New("request not found")), nil
 	}
 	claudeReq := claudeReq_.(*claude.ClaudeRequest)
-	awsClaudeReq := copyRequest(claudeReq)
-	awsReq.Body, err = json.Marshal(awsClaudeReq)
-	if err != nil {
-		return wrapErr(errors.Wrap(err, "marshal request")), nil
+
+	awsReq := &bedrockruntime.ConverseInput{
+		ModelId: aws.String(awsModelId),
+		Messages: []types.Message{
+			{
+				Role: types.ConversationRoleUser,
+				Content: []types.ContentBlock{
+					&types.ContentBlockMemberText{
+						Value: claudeReq.Prompt,
+					},
+				},
+			},
+		},
 	}
 
-	awsResp, err := awsCli.InvokeModel(c.Request.Context(), awsReq)
+	awsResp, err := awsCli.Converse(c.Request.Context(), awsReq)
 	if err != nil {
-		return wrapErr(errors.Wrap(err, "InvokeModel")), nil
+		return wrapErr(errors.Wrap(err, "Converse")), nil
 	}
 
-	claudeResponse := new(claude.ClaudeResponse)
-	err = json.Unmarshal(awsResp.Body, claudeResponse)
-	if err != nil {
-		return wrapErr(errors.Wrap(err, "unmarshal response")), nil
+	type Usage struct {
+		InputTokens  int
+		OutputTokens int
 	}
 
-	openaiResp := claude.ResponseClaude2OpenAI(requestMode, claudeResponse)
-	usage := relaymodel.Usage{
-		PromptTokens:     claudeResponse.Usage.InputTokens,
-		CompletionTokens: claudeResponse.Usage.OutputTokens,
-		TotalTokens:      claudeResponse.Usage.InputTokens + claudeResponse.Usage.OutputTokens,
+	type ClaudeResponse struct {
+		Completion string
+		Usage      Usage
 	}
-	openaiResp.Usage = usage
+
+	type BedrockResponse struct {
+		Completion string
+		Usage      struct {
+			InputTokens  int
+			OutputTokens int
+		}
+	}
+
+	outputMessage, ok := awsResp.Output.(*types.ConverseOutputMemberMessage)
+	if !ok {
+		return wrapErr(errors.New("invalid output type")), nil
+	}
+
+	bedrockResponse := &BedrockResponse{
+		Completion: outputMessage.Value.Content[0].(*types.ContentBlockMemberText).Value,
+		Usage: struct {
+			InputTokens  int
+			OutputTokens int
+		}{
+			InputTokens:  int(*awsResp.Usage.InputTokens),
+			OutputTokens: int(*awsResp.Usage.OutputTokens),
+		},
+	}
+
+	openaiResp := &relaymodel.OpenAITextResponse{
+		Choices: []relaymodel.OpenAITextResponseChoice{
+			{
+				Message: relaymodel.Message{
+					Content: json.RawMessage(bedrockResponse.Completion),
+				},
+			},
+		},
+		Usage: relaymodel.Usage{
+			PromptTokens:     bedrockResponse.Usage.InputTokens,
+			CompletionTokens: bedrockResponse.Usage.OutputTokens,
+			TotalTokens:      bedrockResponse.Usage.InputTokens + bedrockResponse.Usage.OutputTokens,
+		},
+	}
 
 	c.JSON(http.StatusOK, openaiResp)
-	return nil, &usage
+	return nil, &openaiResp.Usage
+
+	c.JSON(http.StatusOK, openaiResp)
+	return nil, &openaiResp.Usage
 }
 
 func awsStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, requestMode int) (*relaymodel.OpenAIErrorWithStatusCode, *relaymodel.Usage) {

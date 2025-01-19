@@ -2,12 +2,12 @@ package aws
 
 import (
 	"errors"
-	"github.com/gin-gonic/gin"
 	"io"
 	"net/http"
 	"one-api/dto"
-	"one-api/relay/channel/claude"
 	relaycommon "one-api/relay/common"
+
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -46,13 +46,21 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, info *relaycommon.RelayInfo, re
 		return nil, errors.New("request is nil")
 	}
 
-	var claudeReq *claude.ClaudeRequest
-	var err error
-	claudeReq, err = claude.RequestOpenAI2ClaudeMessage(*request)
+	awsReq := &dto.AWSConverseRequest{
+		ModelId: request.Model,
+		Messages: []dto.AWSConverseMessage{
+			{
+				Role: "user",
+				Content: dto.AWSConverseContent{
+					Text: request.Messages[0].Content,
+				},
+			},
+		},
+	}
 
 	c.Set("request_model", request.Model)
-	c.Set("converted_request", claudeReq)
-	return claudeReq, err
+	c.Set("converted_request", awsReq)
+	return awsReq, nil
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
