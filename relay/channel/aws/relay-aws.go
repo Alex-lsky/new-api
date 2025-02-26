@@ -4,17 +4,19 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
 	"io"
 	"net/http"
 	"one-api/common"
+	"one-api/dto"
 	relaymodel "one-api/dto"
 	"one-api/relay/channel/claude"
 	relaycommon "one-api/relay/common"
 	"one-api/service"
 	"strings"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/pkg/errors"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -66,44 +68,80 @@ func awsHandler(c *gin.Context, info *relaycommon.RelayInfo, requestMode int) (*
 		return wrapErr(errors.Wrap(err, "awsModelID")), nil
 	}
 
-	awsReq := &bedrockruntime.InvokeModelInput{
-		ModelId:     aws.String(awsModelId),
-		Accept:      aws.String("application/json"),
-		ContentType: aws.String("application/json"),
+	converseReq := &bedrockruntime.ConverseInput{
+		ModelId: aws.String(awsModelId),
+		Messages: []types.Message{
+			{
+				Role: types.ConversationRoleUser,
+				Content: []types.ContentBlock{
+					&types.ContentBlockMemberText{
+						Value: c.GetString("prompt"),
+					},
+				},
+			},
+		},
+		InferenceConfig: &types.InferenceConfiguration{
+			MaxTokens:   aws.Int32(2048),
+			Temperature: aws.Float32(0.7),
+		},
 	}
 
-	claudeReq_, ok := c.Get("converted_request")
-	if !ok {
-		return wrapErr(errors.New("request not found")), nil
-	}
-	claudeReq := claudeReq_.(*claude.ClaudeRequest)
-	awsClaudeReq := copyRequest(claudeReq)
-	awsReq.Body, err = json.Marshal(awsClaudeReq)
+	awsResp, err := awsCli.Converse(c.Request.Context(), converseReq)
 	if err != nil {
-		return wrapErr(errors.Wrap(err, "marshal request")), nil
+		return wrapErr(errors.Wrap(err, "Converse")), nil
 	}
 
-	awsResp, err := awsCli.InvokeModel(c.Request.Context(), awsReq)
-	if err != nil {
-		return wrapErr(errors.Wrap(err, "InvokeModel")), nil
-	}
-
-	claudeResponse := new(claude.ClaudeResponse)
-	err = json.Unmarshal(awsResp.Body, claudeResponse)
-	if err != nil {
-		return wrapErr(errors.Wrap(err, "unmarshal response")), nil
-	}
-
-	openaiResp := claude.ResponseClaude2OpenAI(requestMode, claudeResponse)
+	openaiResp := convertConverseResponse(converseReq, awsResp)
 	usage := relaymodel.Usage{
-		PromptTokens:     claudeResponse.Usage.InputTokens,
-		CompletionTokens: claudeResponse.Usage.OutputTokens,
-		TotalTokens:      claudeResponse.Usage.InputTokens + claudeResponse.Usage.OutputTokens,
+		PromptTokens:     int(*awsResp.Usage.InputTokens),
+		CompletionTokens: int(*awsResp.Usage.OutputTokens),
+		TotalTokens:      int(*awsResp.Usage.InputTokens + *awsResp.Usage.OutputTokens),
 	}
 	openaiResp.Usage = usage
 
 	c.JSON(http.StatusOK, openaiResp)
 	return nil, &usage
+}
+func convertConverseResponse(input *bedrockruntime.ConverseInput, resp *bedrockruntime.ConverseOutput) *dto.OpenAITextResponse {
+	output, ok := resp.Output.(*types.ConverseOutputMemberMessage)
+	if !ok {
+		errorContent, _ := json.Marshal("Invalid response format")
+		return &dto.OpenAITextResponse{
+			Choices: []dto.OpenAITextResponseChoice{
+				{
+					Message: dto.Message{
+						Content: errorContent,
+					},
+				},
+			},
+		}
+	}
+
+	content := ""
+	for _, block := range output.Value.Content {
+		if textBlock, ok := block.(*types.ContentBlockMemberText); ok {
+			content += textBlock.Value
+		}
+	}
+
+	contentBytes, _ := json.Marshal(content)
+
+	return &dto.OpenAITextResponse{
+		Id:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   *input.ModelId,
+		Choices: []dto.OpenAITextResponseChoice{
+			{
+				Index: 0,
+				Message: dto.Message{
+					Role:    string(output.Value.Role),
+					Content: contentBytes,
+				},
+				FinishReason: string(resp.StopReason),
+			},
+		},
+	}
 }
 
 func awsStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, requestMode int) (*relaymodel.OpenAIErrorWithStatusCode, *relaymodel.Usage) {
@@ -123,14 +161,12 @@ func awsStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 		ContentType: aws.String("application/json"),
 	}
 
-	claudeReq_, ok := c.Get("converted_request")
-	if !ok {
-		return wrapErr(errors.New("request not found")), nil
+	// 通用请求处理逻辑
+	convertedReq, exists := c.Get("converted_request")
+	if !exists {
+		return wrapErr(errors.New("converted request not found")), nil
 	}
-	claudeReq := claudeReq_.(*claude.ClaudeRequest)
-
-	awsClaudeReq := copyRequest(claudeReq)
-	awsReq.Body, err = json.Marshal(awsClaudeReq)
+	awsReq.Body, err = json.Marshal(convertedReq)
 	if err != nil {
 		return wrapErr(errors.Wrap(err, "marshal request")), nil
 	}

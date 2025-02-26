@@ -2,12 +2,15 @@ package aws
 
 import (
 	"errors"
-	"github.com/gin-gonic/gin"
+	"fmt"
 	"io"
 	"net/http"
 	"one-api/dto"
 	"one-api/relay/channel/claude"
 	relaycommon "one-api/relay/common"
+	"strings"
+
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -46,13 +49,42 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, info *relaycommon.RelayInfo, re
 		return nil, errors.New("request is nil")
 	}
 
-	var claudeReq *claude.ClaudeRequest
-	var err error
-	claudeReq, err = claude.RequestOpenAI2ClaudeMessage(*request)
+	// 根据模型类型选择不同的转换逻辑
+	switch {
+	case strings.Contains(request.Model, "claude"):
+		claudeReq, err := claude.RequestOpenAI2ClaudeMessage(*request)
+		if err != nil {
+			return nil, err
+		}
+		c.Set("converted_request", claudeReq)
+	case strings.Contains(request.Model, "llama"):
+		llamaReq, err := convertToLlamaRequest(*request)
+		if err != nil {
+			return nil, err
+		}
+		c.Set("converted_request", llamaReq)
+	case strings.Contains(request.Model, "mistral"):
+		mistralReq, err := convertToMistralRequest(*request)
+		if err != nil {
+			return nil, err
+		}
+		c.Set("converted_request", mistralReq)
+	case strings.Contains(request.Model, "jamba"):
+		jambaReq, err := convertToJambaRequest(*request)
+		if err != nil {
+			return nil, err
+		}
+		c.Set("converted_request", jambaReq)
+	default:
+		return nil, fmt.Errorf("unsupported model type: %s", request.Model)
+	}
 
 	c.Set("request_model", request.Model)
-	c.Set("converted_request", claudeReq)
-	return claudeReq, err
+	convertedReq, exists := c.Get("converted_request")
+	if !exists {
+		return nil, errors.New("converted request not found in context")
+	}
+	return convertedReq, nil
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
@@ -82,4 +114,20 @@ func (a *Adaptor) GetModelList() (models []string) {
 
 func (a *Adaptor) GetChannelName() string {
 	return ChannelName
+}
+
+// 新增模型转换函数
+func convertToLlamaRequest(request dto.GeneralOpenAIRequest) (*dto.GeneralOpenAIRequest, error) {
+	// Llama使用原生OpenAI格式
+	return &request, nil
+}
+
+func convertToMistralRequest(request dto.GeneralOpenAIRequest) (*dto.GeneralOpenAIRequest, error) {
+	// Mistral使用原生OpenAI格式
+	return &request, nil
+}
+
+func convertToJambaRequest(request dto.GeneralOpenAIRequest) (*dto.GeneralOpenAIRequest, error) {
+	// Jamba使用原生OpenAI格式
+	return &request, nil
 }
