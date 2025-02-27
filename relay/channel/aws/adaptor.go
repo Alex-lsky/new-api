@@ -44,10 +44,42 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, info *relaycommon.RelayInfo, re
 		return nil, errors.New("request is nil")
 	}
 
+	awsReq := &dto.AWSConverseRequest{
+		ModelId: request.Model,
+		Messages: []dto.AWSConverseMessage{
+			{
+				Role: "user",
+				Content: dto.AWSConverseContent{
+					Text: request.Messages[0].Content,
+				},
+			},
+		},
+	}
+
+	c.Set("request_model", request.Model)
+	c.Set("converted_request", awsReq)
+	return awsReq, nil
+>>>>>>> 7fcb696146e84d7583114d1df210f76f5d2c69f0
+=======
 	// 获取模型ID
 	modelID := GetModelID(request.Model)
 	if modelID == "" {
-		return nil, errors.New("unsupported model")
+		// 如果不是Bedrock模型，则尝试使用AWS Converse模型
+		awsReq := &dto.AWSConverseRequest{
+			ModelId: request.Model,
+			Messages: []dto.AWSConverseMessage{
+				{
+					Role: "user",
+					Content: dto.AWSConverseContent{
+						Text: request.Messages[0].Content,
+					},
+				},
+			},
+		}
+
+		c.Set("request_model", request.Model)
+		c.Set("converted_request", awsReq)
+		return awsReq, nil
 	}
 
 	// 转换消息格式
@@ -74,6 +106,23 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, info *relaycommon.RelayInfo, re
 	c.Set("bedrock_request", bedrockReq)
 
 	return bedrockReq, nil
+=======
+	awsReq := &dto.AWSConverseRequest{
+		ModelId: request.Model,
+		Messages: []dto.AWSConverseMessage{
+			{
+				Role: "user",
+				Content: dto.AWSConverseContent{
+					Text: request.Messages[0].Content,
+				},
+			},
+		},
+	}
+
+	c.Set("request_model", request.Model)
+	c.Set("converted_request", awsReq)
+	return awsReq, nil
+>>>>>>> 7fcb696146e84d7583114d1df210f76f5d2c69f0
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {

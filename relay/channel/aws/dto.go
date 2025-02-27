@@ -6,6 +6,49 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+type AWSConverseRequest struct {
+	Messages    []AWSConverseMessage `json:"messages"`
+	ModelID     string               `json:"modelId"`
+	Temperature float64              `json:"temperature,omitempty"`
+	TopP        float64              `json:"topP,omitempty"`
+	MaxTokens   int                  `json:"maxTokens,omitempty"`
+}
+
+type AWSConverseResponse struct {
+	Message AWSConverseMessage `json:"message"`
+	Usage   struct {
+		InputTokens  int `json:"inputTokens"`
+		OutputTokens int `json:"outputTokens"`
+	} `json:"usage"`
+}
+
+type AWSConverseMessage struct {
+	Role    string                    `json:"role"`
+	Content []AWSConverseContentBlock `json:"content"`
+}
+
+type AWSConverseContentBlock struct {
+	Text string `json:"text"`
+}
+
+func copyRequest(req *claude.ClaudeRequest) *AwsClaudeRequest {
+	return &AwsClaudeRequest{
+		AnthropicVersion: "bedrock-2023-05-31",
+		System:           req.System,
+		Messages:         req.Messages,
+		MaxTokens:        req.MaxTokens,
+		Temperature:      req.Temperature,
+		TopP:             req.TopP,
+		TopK:             req.TopK,
+		StopSequences:    req.StopSequences,
+		Tools:            req.Tools,
+		ToolChoice:       req.ToolChoice,
+	}
+>>>>>>> 7fcb696146e84d7583114d1df210f76f5d2c69f0
+	}
+	return model
+}
+=======
 // BedrockRequest 统一的Bedrock请求结构
 type BedrockRequest struct {
 	ModelId  string    `json:"modelId"`
@@ -48,6 +91,35 @@ type BedrockUsage struct {
 	TotalTokens  int `json:"totalTokens"`
 }
 
+// AWSConverseRequest AWS Converse请求结构
+type AWSConverseRequest struct {
+	Messages    []AWSConverseMessage `json:"messages"`
+	ModelID     string               `json:"modelId"`
+	Temperature float64              `json:"temperature,omitempty"`
+	TopP        float64              `json:"topP,omitempty"`
+	MaxTokens   int                  `json:"maxTokens,omitempty"`
+}
+
+// AWSConverseResponse AWS Converse响应结构
+type AWSConverseResponse struct {
+	Message AWSConverseMessage `json:"message"`
+	Usage   struct {
+		InputTokens  int `json:"inputTokens"`
+		OutputTokens int `json:"outputTokens"`
+	} `json:"usage"`
+}
+
+// AWSConverseMessage AWS Converse消息结构
+type AWSConverseMessage struct {
+	Role    string                    `json:"role"`
+	Content []AWSConverseContentBlock `json:"content"`
+}
+
+// AWSConverseContentBlock AWS Converse内容块结构
+type AWSConverseContentBlock struct {
+	Text string `json:"text"`
+}
+
 // 支持的模型列表
 var SupportedModels = map[string]string{
 	// Claude系列
@@ -78,6 +150,48 @@ var SupportedModels = map[string]string{
 func GetModelID(model string) string {
 	if modelID, ok := SupportedModels[model]; ok {
 		return modelID
+	}
+	return model
+}
+=======
+type AWSConverseRequest struct {
+	Messages    []AWSConverseMessage `json:"messages"`
+	ModelID     string               `json:"modelId"`
+	Temperature float64              `json:"temperature,omitempty"`
+	TopP        float64              `json:"topP,omitempty"`
+	MaxTokens   int                  `json:"maxTokens,omitempty"`
+}
+
+type AWSConverseResponse struct {
+	Message AWSConverseMessage `json:"message"`
+	Usage   struct {
+		InputTokens  int `json:"inputTokens"`
+		OutputTokens int `json:"outputTokens"`
+	} `json:"usage"`
+}
+
+type AWSConverseMessage struct {
+	Role    string                    `json:"role"`
+	Content []AWSConverseContentBlock `json:"content"`
+}
+
+type AWSConverseContentBlock struct {
+	Text string `json:"text"`
+}
+
+func copyRequest(req *claude.ClaudeRequest) *AwsClaudeRequest {
+	return &AwsClaudeRequest{
+		AnthropicVersion: "bedrock-2023-05-31",
+		System:           req.System,
+		Messages:         req.Messages,
+		MaxTokens:        req.MaxTokens,
+		Temperature:      req.Temperature,
+		TopP:             req.TopP,
+		TopK:             req.TopK,
+		StopSequences:    req.StopSequences,
+		Tools:            req.Tools,
+		ToolChoice:       req.ToolChoice,
+>>>>>>> 7fcb696146e84d7583114d1df210f76f5d2c69f0
 	}
 	return model
 }
