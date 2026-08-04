@@ -50,6 +50,28 @@ func applyUsagePostProcessing(info *relaycommon.RelayInfo, usage *dto.Usage, res
 	}
 }
 
+func normalizeUsage(usage *dto.Usage) {
+	if usage == nil {
+		return
+	}
+	if usage.PromptTokens == 0 && usage.InputTokens > 0 {
+		usage.PromptTokens = usage.InputTokens
+	}
+	if usage.CompletionTokens == 0 && usage.OutputTokens > 0 {
+		usage.CompletionTokens = usage.OutputTokens
+	}
+	if usage.TotalTokens == 0 {
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
+	if usage.PromptTokensDetails.CachedTokens == 0 {
+		if usage.InputTokensDetails != nil && usage.InputTokensDetails.CachedTokens > 0 {
+			usage.PromptTokensDetails.CachedTokens = usage.InputTokensDetails.CachedTokens
+		} else if usage.PromptCacheHitTokens > 0 {
+			usage.PromptTokensDetails.CachedTokens = usage.PromptCacheHitTokens
+		}
+	}
+}
+
 func extractCachedTokensFromBody(body []byte) (int, bool) {
 	if len(body) == 0 {
 		return 0, false

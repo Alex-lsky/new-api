@@ -325,17 +325,27 @@ type IncompleteDetails struct {
 }
 
 type ResponsesOutput struct {
-	Type      string                   `json:"type"`
-	ID        string                   `json:"id"`
-	Status    string                   `json:"status"`
-	Role      string                   `json:"role"`
-	Content   []ResponsesOutputContent `json:"content"`
-	Quality   string                   `json:"quality"`
-	Size      string                   `json:"size"`
-	Result    string                   `json:"result,omitempty"`
-	CallId    string                   `json:"call_id,omitempty"`
-	Name      string                   `json:"name,omitempty"`
-	Arguments json.RawMessage          `json:"arguments,omitempty"`
+	Type    string                   `json:"type"`
+	ID      string                   `json:"id"`
+	Status  string                   `json:"status"`
+	Role    string                   `json:"role"`
+	Content []ResponsesOutputContent `json:"content"`
+	Quality string                   `json:"quality"`
+	Size    string                   `json:"size"`
+	Result  string                   `json:"result,omitempty"`
+	CallId  string                   `json:"call_id,omitempty"`
+	Name    string                   `json:"name,omitempty"`
+	// Namespace restores namespaced Responses tool calls bridged through chat
+	// (e.g. MCP tools flattened to a chat function name). Empty for native
+	// function calls and tools the chat upstream reports directly.
+	Namespace string `json:"namespace,omitempty"`
+	// Execution marks how a tool_search_call was executed (e.g. "client").
+	Execution string `json:"execution,omitempty"`
+	// Input holds the raw string input of a custom_tool_call restored from a
+	// bridged chat function call. Pointer-typed so nil (absent) and empty
+	// string ("") round-trip distinctly.
+	Input     *string         `json:"input,omitempty"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
 // ArgumentsString returns function call arguments in the string form expected by Chat Completions.
@@ -395,6 +405,13 @@ type ResponsesStreamResponse struct {
 	SummaryIndex *int                           `json:"summary_index,omitempty"`
 	ItemID       string                         `json:"item_id,omitempty"`
 	Part         *ResponsesReasoningSummaryPart `json:"part,omitempty"`
+	// Arguments is the object/raw arguments payload on a function_call_arguments
+	// done event for tool_search bridged calls (native function calls carry
+	// arguments through Delta as a string instead).
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	// Input is the resolved input string on a custom_tool_call_input.done event
+	// for bridged custom tools. Pointer-typed to distinguish absent vs empty.
+	Input *string `json:"input,omitempty"`
 }
 
 // GetOpenAIError 从动态错误类型中提取OpenAIError结构

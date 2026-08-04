@@ -232,7 +232,10 @@ func TestResponsesRequestToChatCompletionsRequestToolsToolChoiceAndTextFormat(t 
 	assert.True(t, gjson.GetBytes(got.ResponseFormat.JsonSchema, "strict").Bool())
 }
 
-func TestResponsesRequestToChatCompletionsRequestCustomToolCallPreservesRawShape(t *testing.T) {
+// Custom tool calls are bridged to a regular chat function so the chat
+// upstream accepts them. The input value is wrapped in {"input": ...} so the
+// response converter can unwrap it back into a native custom_tool_call.
+func TestResponsesRequestToChatCompletionsRequestCustomToolCallUsesValidChatFunctionShape(t *testing.T) {
 	got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{
 		Model: "gpt-test",
 		Input: mustRawMessage(t, []map[string]any{
@@ -249,12 +252,11 @@ func TestResponsesRequestToChatCompletionsRequestCustomToolCallPreservesRawShape
 	require.Len(t, got.Messages, 1)
 	toolCalls := got.Messages[0].ParseToolCalls()
 	require.Len(t, toolCalls, 1)
-	assert.Equal(t, dto.CustomType, toolCalls[0].Type)
+	assert.Equal(t, "function", toolCalls[0].Type)
 	assert.Equal(t, "call_custom", toolCalls[0].ID)
 	assert.Equal(t, "apply_patch", toolCalls[0].Function.Name)
-	assert.Equal(t, "patch body", toolCalls[0].Function.Arguments)
-	assert.Equal(t, "custom_tool_call", gjson.GetBytes(toolCalls[0].Custom, "type").String())
-	assert.Equal(t, "patch body", gjson.GetBytes(toolCalls[0].Custom, "input").String())
+	assert.JSONEq(t, `{"input":"patch body"}`, toolCalls[0].Function.Arguments)
+	assert.Empty(t, toolCalls[0].Custom)
 }
 
 func TestResponsesRequestToChatCompletionsRequestRejectsStatefulFields(t *testing.T) {
@@ -355,4 +357,118 @@ func mustRawMessage(t *testing.T, value any) []byte {
 	raw, err := kitutil.Marshal(value)
 	require.NoError(t, err)
 	return raw
+}
+
+// Regression for #1: web_search/web_search_preview and other Responses-only
+// built-ins must be dropped (not forwarded as raw blobs that 400, and not
+// rejected so hard that a default-tools request can't convert at all).
+func TestResponsesRequestToChatDropsResponsesOnlyBuiltinTools(t *testing.T) {
+	got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{
+		Model: "deepseek-v4-flash",
+		Input: mustRawMessage(t, "hi"),
+		Tools: mustRawMessage(t, []map[string]any{
+			{"type": "function", "name": "lookup", "parameters": map[string]any{"type": "object"}},
+			{"type": "web_search_preview"},
+			{"type": "web_search"},
+			{"type": "image_generation"},
+		}),
+	})
+	require.NoError(t, err)
+	require.Len(t, got.Tools, 1)
+	assert.Equal(t, "lookup", got.Tools[0].Function.Name)
+}
+
+// Regression for #3+#4: tool_search / custom tools bridge to chat functions,
+// history tool_search_call maps to the proxy, and a tool_search_output in the
+// input surfaces its embedded tools as chat functions.
+func TestResponsesRequestToChatBridgesCodexToolDefinitionsAndHistory(t *testing.T) {
+	longNamespace := "mcp__codex_apps__a_namespace_name_that_is_deliberately_long_for_chat_tools"
+	got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{
+		Model: "deepseek-v4-flash",
+		Tools: mustRawMessage(t, []map[string]any{
+			{"type": "tool_search"},
+			{
+				"type":        "custom",
+				"name":        "apply_patch",
+				"description": "Apply a patch.",
+				"format":      map[string]any{"type": "grammar", "syntax": "lark"},
+			},
+			{
+				"type": "namespace",
+				"name": longNamespace,
+				"tools": []map[string]any{{
+					"type":       "function",
+					"name":       "read_file_with_a_deliberately_long_name",
+					"parameters": map[string]any{"type": "object"},
+				}},
+			},
+		}),
+		Input: mustRawMessage(t, []map[string]any{
+			{
+				"type":      "tool_search_call",
+				"call_id":   "call_search",
+				"arguments": map[string]any{"query": "mail", "limit": 5},
+			},
+			{
+				"type":    "tool_search_output",
+				"call_id": "call_search",
+				"tools": []map[string]any{{
+					"type": "namespace",
+					"name": "mcp__gmail",
+					"tools": []map[string]any{{
+						"type":       "function",
+						"name":       "search_emails",
+						"parameters": map[string]any{"type": "object"},
+					}},
+				}},
+			},
+		}),
+		ToolChoice: mustRawMessage(t, map[string]any{"type": "custom", "name": "apply_patch"}),
+	})
+	require.NoError(t, err)
+
+	// tool_search + apply_patch + long namespace (truncated) + gmail child.
+	require.Len(t, got.Tools, 4)
+	for index, tool := range got.Tools {
+		assert.Equal(t, "function", tool.Type, "tool %d", index)
+		assert.NotEmpty(t, tool.Function.Name, "tool %d", index)
+	}
+	assert.Equal(t, "tool_search", got.Tools[0].Function.Name)
+	assert.Equal(t, "apply_patch", got.Tools[1].Function.Name)
+	assert.Contains(t, got.Tools[1].Function.Description, `"type":"custom"`)
+	assert.LessOrEqual(t, len(got.Tools[2].Function.Name), chatToolNameMaxLen)
+	assert.Equal(t, "mcp__gmail__search_emails", got.Tools[3].Function.Name)
+	assert.Equal(t, map[string]any{
+		"type":     "function",
+		"function": map[string]any{"name": "apply_patch"},
+	}, got.ToolChoice)
+
+	// History: tool_search_call -> assistant tool_call against proxy; output ->
+	// tool message whose content references the loaded namespace.
+	require.Len(t, got.Messages, 2)
+	historyCalls := got.Messages[0].ParseToolCalls()
+	require.Len(t, historyCalls, 1)
+	assert.Equal(t, "function", historyCalls[0].Type)
+	assert.Equal(t, "tool_search", historyCalls[0].Function.Name)
+	assert.JSONEq(t, `{"limit":5,"query":"mail"}`, historyCalls[0].Function.Arguments)
+	assert.Equal(t, "tool", got.Messages[1].Role)
+	assert.Equal(t, "call_search", got.Messages[1].ToolCallId)
+	assert.Contains(t, got.Messages[1].StringContent(), "mcp__gmail")
+}
+
+// Regression for #4: custom tool input null/missing round-trips as a valid
+// {"input": null} envelope instead of a malformed empty body.
+func TestResponsesRequestToChatCustomToolCallWithNullInput(t *testing.T) {
+	got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{
+		Model: "gpt-test",
+		Input: mustRawMessage(t, []map[string]any{
+			{"type": "custom_tool_call", "call_id": "c1", "name": "apply_patch", "input": nil},
+		}),
+	})
+	require.NoError(t, err)
+	toolCalls := got.Messages[0].ParseToolCalls()
+	require.Len(t, toolCalls, 1)
+	assert.Equal(t, "function", toolCalls[0].Type)
+	assert.Equal(t, "apply_patch", toolCalls[0].Function.Name)
+	assert.JSONEq(t, `{"input":null}`, toolCalls[0].Function.Arguments)
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/convmeta"
 )
 
 type ChatToResponsesStreamEvent struct {
@@ -35,6 +36,7 @@ type ChatToResponsesStreamState struct {
 	outputOrder       []chatToResponsesOutputRef
 	text              strings.Builder
 	reasoning         strings.Builder
+	responsesBridge   *convmeta.ResponsesChatBridgeContext
 }
 
 type chatToResponsesStreamTool struct {
@@ -43,6 +45,7 @@ type chatToResponsesStreamTool struct {
 	ID          string
 	Name        string
 	Arguments   strings.Builder
+	Added       bool
 	Done        bool
 }
 
@@ -61,6 +64,16 @@ func NewChatToResponsesStreamState(id string, model string) *ChatToResponsesStre
 		textOutputIndex: -1,
 		reasoningIndex:  -1,
 		toolsByIndex:    make(map[int]*chatToResponsesStreamTool),
+	}
+}
+
+// SetResponsesChatBridge wires the request-scoped bridge so streamed chat
+// function calls can be restored to native Responses tool kinds. Only the first
+// non-nil assignment wins; later calls are ignored to avoid clobbering state
+// shared with the request converter.
+func (s *ChatToResponsesStreamState) SetResponsesChatBridge(bridge *convmeta.ResponsesChatBridgeContext) {
+	if s != nil && s.responsesBridge == nil && bridge != nil {
+		s.responsesBridge = bridge
 	}
 }
 
@@ -197,11 +210,11 @@ func (s *ChatToResponsesStreamState) appendToolCallDelta(toolCall dto.ToolCallRe
 		chatIndex = *toolCall.Index
 	}
 	tool := s.toolsByIndex[chatIndex]
-	events := make([]ChatToResponsesStreamEvent, 0, 2)
+	events := make([]ChatToResponsesStreamEvent, 0, 3)
 	if tool == nil {
 		tool = &chatToResponsesStreamTool{
 			ChatIndex:   chatIndex,
-			OutputIndex: s.nextIndex("tool", chatIndex),
+			OutputIndex: -1,
 			ID:          strings.TrimSpace(toolCall.ID),
 			Name:        strings.TrimSpace(toolCall.Function.Name),
 		}
@@ -209,20 +222,11 @@ func (s *ChatToResponsesStreamState) appendToolCallDelta(toolCall dto.ToolCallRe
 			tool.ID = fmt.Sprintf("%s_call_%d", s.ID, chatIndex)
 		}
 		s.toolsByIndex[chatIndex] = tool
-		events = append(events, responsesStreamEvent(responsesEventOutputItemAdded, dto.ResponsesStreamResponse{
-			Type:        responsesEventOutputItemAdded,
-			OutputIndex: intPtr(tool.OutputIndex),
-			ItemID:      tool.ID,
-			Item: &dto.ResponsesOutput{
-				Type:      responsesOutputTypeFunctionCall,
-				ID:        tool.ID,
-				Status:    "in_progress",
-				CallId:    tool.ID,
-				Name:      tool.Name,
-				Arguments: []byte(`""`),
-			},
-		}))
 	}
+	// Defer the output_item.added event until we know the tool name: a nameless
+	// function call is invalid in the Responses schema, and some upstreams send
+	// the ID in one chunk and the name only in a later one.
+	wasAdded := tool.Added
 	if strings.TrimSpace(toolCall.ID) != "" {
 		tool.ID = strings.TrimSpace(toolCall.ID)
 	}
@@ -231,11 +235,33 @@ func (s *ChatToResponsesStreamState) appendToolCallDelta(toolCall dto.ToolCallRe
 	}
 	if toolCall.Function.Arguments != "" {
 		tool.Arguments.WriteString(toolCall.Function.Arguments)
+	}
+	if !tool.Added && tool.Name != "" {
+		tool.Added = true
+		tool.OutputIndex = s.nextIndex("tool", chatIndex)
+		item, err := s.toolOutput(tool, "in_progress", "")
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, responsesStreamEvent(responsesEventOutputItemAdded, dto.ResponsesStreamResponse{
+			Type:        responsesEventOutputItemAdded,
+			OutputIndex: intPtr(tool.OutputIndex),
+			ItemID:      item.ID,
+			Item:        item,
+		}))
+	}
+	// Custom tools carry their input via custom_tool_call_input events; only
+	// emit function_call_arguments deltas for non-custom tools.
+	if tool.Added && toolCall.Function.Arguments != "" && !s.isCustomTool(tool.Name) {
+		delta := toolCall.Function.Arguments
+		if !wasAdded {
+			delta = tool.Arguments.String()
+		}
 		events = append(events, responsesStreamEvent(responsesEventFunctionArgsDelta, dto.ResponsesStreamResponse{
 			Type:        responsesEventFunctionArgsDelta,
 			OutputIndex: intPtr(tool.OutputIndex),
-			ItemID:      tool.ID,
-			Delta:       toolCall.Function.Arguments,
+			ItemID:      s.toolItemID(tool),
+			Delta:       delta,
 		}))
 	}
 	return events, nil
@@ -277,19 +303,51 @@ func (s *ChatToResponsesStreamState) doneDeltaEvents() []ChatToResponsesStreamEv
 		}))
 	}
 	for _, tool := range s.sortedTools() {
-		if tool.Done {
+		// Skip tools that never produced a usable function name (no added event
+		// fired) or are already finalized.
+		if tool.Done || !tool.Added {
 			continue
 		}
 		tool.Done = true
-		events = append(events, responsesStreamEvent(responsesEventFunctionArgsDone, dto.ResponsesStreamResponse{
-			Type:        responsesEventFunctionArgsDone,
-			OutputIndex: intPtr(tool.OutputIndex),
-			ItemID:      tool.ID,
-		}))
+		item, err := s.toolOutput(tool, status, tool.Arguments.String())
+		if err != nil {
+			continue
+		}
+		// Custom tools terminate with custom_tool_call_input delta+done so the
+		// client sees the same input event sequence it would for a native
+		// custom_tool_call. function/namespace/tool_search terminate with the
+		// standard function_call_arguments.done.
+		if s.isCustomTool(tool.Name) {
+			input := ""
+			if item.Input != nil {
+				input = *item.Input
+			}
+			if input != "" {
+				events = append(events, responsesStreamEvent(responsesEventCustomToolInputDelta, dto.ResponsesStreamResponse{
+					Type:        responsesEventCustomToolInputDelta,
+					OutputIndex: intPtr(tool.OutputIndex),
+					ItemID:      item.ID,
+					Delta:       input,
+				}))
+			}
+			events = append(events, responsesStreamEvent(responsesEventCustomToolInputDone, dto.ResponsesStreamResponse{
+				Type:        responsesEventCustomToolInputDone,
+				OutputIndex: intPtr(tool.OutputIndex),
+				ItemID:      item.ID,
+				Input:       &input,
+			}))
+		} else {
+			events = append(events, responsesStreamEvent(responsesEventFunctionArgsDone, dto.ResponsesStreamResponse{
+				Type:        responsesEventFunctionArgsDone,
+				OutputIndex: intPtr(tool.OutputIndex),
+				ItemID:      item.ID,
+				Arguments:   chatArgumentsRawMessage(tool.Arguments.String()),
+			}))
+		}
 		events = append(events, responsesStreamEvent(responsesEventOutputItemDone, dto.ResponsesStreamResponse{
 			Type:        responsesEventOutputItemDone,
 			OutputIndex: intPtr(tool.OutputIndex),
-			Item:        s.toolOutput(tool, status),
+			Item:        item,
 		}))
 	}
 	return events
@@ -312,8 +370,10 @@ func (s *ChatToResponsesStreamState) finalResponse() *dto.OpenAIResponsesRespons
 		case "reasoning":
 			output = append(output, *s.reasoningOutput(status))
 		case "tool":
-			if tool := s.toolsByIndex[ref.ToolIndex]; tool != nil {
-				output = append(output, *s.toolOutput(tool, status))
+			if tool := s.toolsByIndex[ref.ToolIndex]; tool != nil && tool.Added {
+				if item, err := s.toolOutput(tool, status, tool.Arguments.String()); err == nil {
+					output = append(output, *item)
+				}
 			}
 		}
 	}
@@ -405,13 +465,29 @@ func (s *ChatToResponsesStreamState) reasoningOutput(status string) *dto.Respons
 	}
 }
 
-func (s *ChatToResponsesStreamState) toolOutput(tool *chatToResponsesStreamTool, status string) *dto.ResponsesOutput {
-	return &dto.ResponsesOutput{
-		Type:      responsesOutputTypeFunctionCall,
-		ID:        tool.ID,
-		Status:    status,
-		CallId:    tool.ID,
-		Name:      tool.Name,
-		Arguments: chatArgumentsRawMessage(tool.Arguments.String()),
+func (s *ChatToResponsesStreamState) toolOutput(tool *chatToResponsesStreamTool, status string, arguments string) (*dto.ResponsesOutput, error) {
+	item, err := chatToolCallToResponsesOutput(dto.ToolCallRequest{
+		ID:   tool.ID,
+		Type: "function",
+		Function: dto.FunctionRequest{
+			Name:      tool.Name,
+			Arguments: arguments,
+		},
+	}, s.ID, tool.ChatIndex, status, s.responsesBridge)
+	if err != nil {
+		return nil, err
 	}
+	return &item, nil
+}
+
+func (s *ChatToResponsesStreamState) isCustomTool(chatName string) bool {
+	spec, ok := s.responsesBridge.Lookup(chatName)
+	return ok && spec.Kind == convmeta.ResponsesChatToolCustom
+}
+
+func (s *ChatToResponsesStreamState) toolItemID(tool *chatToResponsesStreamTool) string {
+	if s.isCustomTool(tool.Name) {
+		return "ctc_" + tool.ID
+	}
+	return tool.ID
 }

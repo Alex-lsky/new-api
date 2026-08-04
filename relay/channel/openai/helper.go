@@ -134,7 +134,7 @@ func processCompletionsStreamResponse(streamResponse dto.CompletionsStreamRespon
 func handleLastResponse(lastStreamData string, responseId *string, createAt *int64,
 	systemFingerprint *string, model *string, usage **dto.Usage,
 	containStreamUsage *bool, info *relaycommon.RelayInfo,
-	shouldSendLastResp *bool) error {
+	shouldSendLastResp *bool, fallbackUsage *dto.Usage) error {
 
 	var lastStreamResponse dto.ChatCompletionsStreamResponse
 	if err := common.Unmarshal(common.StringToByteSlice(lastStreamData), &lastStreamResponse); err != nil {
@@ -146,6 +146,7 @@ func handleLastResponse(lastStreamData string, responseId *string, createAt *int
 	*systemFingerprint = lastStreamResponse.GetSystemFingerprint()
 	*model = lastStreamResponse.Model
 
+	normalizeUsage(lastStreamResponse.Usage)
 	if service.ValidUsage(lastStreamResponse.Usage) {
 		*containStreamUsage = true
 		*usage = lastStreamResponse.Usage
@@ -154,6 +155,12 @@ func handleLastResponse(lastStreamData string, responseId *string, createAt *int
 				return choice.Delta.GetContentString() != "" || choice.Delta.GetReasoningContent() != ""
 			})
 		}
+		return nil
+	}
+
+	if fallbackUsage != nil {
+		*containStreamUsage = true
+		*usage = fallbackUsage
 	}
 
 	return nil

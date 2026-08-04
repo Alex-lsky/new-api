@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,8 @@ import (
 	"github.com/QuantumNous/new-api/setting/model_setting"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
@@ -70,6 +73,8 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
 	}
+
+	request.Tools = normalizeResponsesTools(request.Tools)
 
 	adaptor := GetAdaptor(info.ApiType)
 	if adaptor == nil {
@@ -168,4 +173,46 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		service.PostTextConsumeQuota(c, info, usageDto, nil)
 	}
 	return nil
+}
+
+func normalizeResponsesTools(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	result := raw
+	changed := false
+	tools := gjson.ParseBytes(raw).Array()
+	for i, tool := range tools {
+		fn := tool.Get("function")
+		if fn.IsObject() && !tool.Get("name").Exists() {
+			for _, key := range []string{"name", "description", "parameters", "strict"} {
+				if !fn.Get(key).Exists() {
+					continue
+				}
+				var err error
+				result, err = sjson.SetRawBytes(result, fmt.Sprintf("%d.%s", i, key), []byte(fn.Get(key).Raw))
+				if err != nil {
+					return raw
+				}
+			}
+			var err error
+			result, err = sjson.DeleteBytes(result, fmt.Sprintf("%d.function", i))
+			if err != nil {
+				return raw
+			}
+			changed = true
+		}
+		if !gjson.GetBytes(result, fmt.Sprintf("%d.name", i)).Exists() {
+			var err error
+			result, err = sjson.SetBytes(result, fmt.Sprintf("%d.name", i), tool.Get("type").String())
+			if err != nil {
+				return raw
+			}
+			changed = true
+		}
+	}
+	if !changed {
+		return raw
+	}
+	return result
 }

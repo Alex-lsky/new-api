@@ -85,6 +85,22 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	imageCounter := &relaycommon.ImageGenerationCallCounter{}
 	imageCommitted := false
 
+	// Event backfill state. Some upstreams (e.g. OpenCode zen/go forwarding
+	// DeepSeek) emit only output_text.delta + completed, omitting the
+	// output_item.added / content_part.added / *.done events codex relies on.
+	// When the gap is detected, synthesize the standard event sequence before
+	// forwarding; native full-event streams are unaffected.
+	var evtItemAdded bool
+	var evtItemDone bool
+	var evtOutputIndex int
+	var evtMsgID string
+
+	emitSynthetic := func(payload map[string]any) {
+		if b, err := common.Marshal(payload); err == nil {
+			_ = helper.ResponseChunkData(c, dto.ResponsesStreamResponse{}, string(b))
+		}
+	}
+
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 
 		// 检查当前数据是否包含 completed 状态和 usage 信息
@@ -93,6 +109,90 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			logger.LogError(c, "failed to unmarshal stream response: "+err.Error())
 			sr.Error(err)
 			return
+		}
+		// Backfill missing lifecycle events before forwarding the real chunk so
+		// the client observes a well-formed event sequence. Native full-event
+		// streams (OpenAI et al.) announce output_item.added/content_part.added
+		// themselves; we track those so we never duplicate them.
+		switch streamResponse.Type {
+		case "response.output_item.added":
+			evtItemAdded = true
+			if streamResponse.Item != nil && streamResponse.Item.ID != "" {
+				evtMsgID = streamResponse.Item.ID
+			}
+			if streamResponse.OutputIndex != nil {
+				evtOutputIndex = *streamResponse.OutputIndex
+			}
+		case "response.output_item.done":
+			evtItemDone = true
+		case "response.output_text.delta":
+			if !evtItemAdded {
+				if evtMsgID == "" {
+					evtMsgID = "msg_" + common.GetUUID()
+				}
+				emitSynthetic(map[string]any{
+					"type":         "response.output_item.added",
+					"output_index": evtOutputIndex,
+					"item": map[string]any{
+						"id":      evtMsgID,
+						"type":    "message",
+						"status":  "in_progress",
+						"role":    "assistant",
+						"content": []any{},
+					},
+				})
+				emitSynthetic(map[string]any{
+					"type":          "response.content_part.added",
+					"item_id":       evtMsgID,
+					"output_index":  evtOutputIndex,
+					"content_index": 0,
+					"part": map[string]any{
+						"type":        "output_text",
+						"text":        "",
+						"annotations": []any{},
+					},
+				})
+				evtItemAdded = true
+			}
+		case "response.completed", "response.done":
+			if !evtItemDone && evtItemAdded {
+				text := responseTextBuilder.String()
+				emitSynthetic(map[string]any{
+					"type":          "response.output_text.done",
+					"item_id":       evtMsgID,
+					"output_index":  evtOutputIndex,
+					"content_index": 0,
+					"text":          text,
+					"annotations":   []any{},
+				})
+				emitSynthetic(map[string]any{
+					"type":          "response.content_part.done",
+					"item_id":       evtMsgID,
+					"output_index":  evtOutputIndex,
+					"content_index": 0,
+					"part": map[string]any{
+						"type":        "output_text",
+						"text":        text,
+						"annotations": []any{},
+					},
+				})
+				emitSynthetic(map[string]any{
+					"type":         "response.output_item.done",
+					"output_index": evtOutputIndex,
+					"item": map[string]any{
+						"id":     evtMsgID,
+						"type":   "message",
+						"status": "completed",
+						"role":   "assistant",
+						"content": []any{map[string]any{
+							"type":        "output_text",
+							"text":        text,
+							"annotations": []any{},
+						}},
+					},
+				})
+				evtItemDone = true
+			}
 		}
 		sendResponsesStreamData(c, streamResponse, data)
 		switch streamResponse.Type {

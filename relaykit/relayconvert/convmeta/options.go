@@ -18,6 +18,64 @@ type Options struct {
 	// suffix must be kept on the outgoing model name (host blacklist lookup).
 	// Nil means "never preserve".
 	PreserveThinkingSuffix func(modelName string) bool
+
+	// ResponsesChatBridge is request-scoped state used when a Responses request
+	// is bridged through a Chat Completions upstream. Chat only exposes function
+	// tools, so the request converter records how custom, tool_search, and
+	// namespaced tools were represented. The response converter uses the same
+	// state to restore native Responses call items.
+	ResponsesChatBridge *ResponsesChatBridgeContext
+}
+
+type ResponsesChatToolKind string
+
+const (
+	ResponsesChatToolFunction  ResponsesChatToolKind = "function"
+	ResponsesChatToolCustom    ResponsesChatToolKind = "custom"
+	ResponsesChatToolSearch    ResponsesChatToolKind = "tool_search"
+	ResponsesChatToolNamespace ResponsesChatToolKind = "namespace"
+)
+
+type ResponsesChatToolSpec struct {
+	Kind      ResponsesChatToolKind
+	Name      string
+	Namespace string
+}
+
+type ResponsesChatBridgeContext struct {
+	ToolsByChatName map[string]ResponsesChatToolSpec
+}
+
+func (o *Options) ResetResponsesChatBridge() *ResponsesChatBridgeContext {
+	if o == nil {
+		return &ResponsesChatBridgeContext{ToolsByChatName: make(map[string]ResponsesChatToolSpec)}
+	}
+	o.ResponsesChatBridge = &ResponsesChatBridgeContext{
+		ToolsByChatName: make(map[string]ResponsesChatToolSpec),
+	}
+	return o.ResponsesChatBridge
+}
+
+func (c *ResponsesChatBridgeContext) Register(chatName string, spec ResponsesChatToolSpec) bool {
+	if c == nil || chatName == "" {
+		return false
+	}
+	if c.ToolsByChatName == nil {
+		c.ToolsByChatName = make(map[string]ResponsesChatToolSpec)
+	}
+	if _, exists := c.ToolsByChatName[chatName]; exists {
+		return false
+	}
+	c.ToolsByChatName[chatName] = spec
+	return true
+}
+
+func (c *ResponsesChatBridgeContext) Lookup(chatName string) (ResponsesChatToolSpec, bool) {
+	if c == nil {
+		return ResponsesChatToolSpec{}, false
+	}
+	spec, ok := c.ToolsByChatName[chatName]
+	return spec, ok
 }
 
 type ClaudeOptions struct {

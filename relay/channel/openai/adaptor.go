@@ -617,7 +617,270 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 	if info != nil && request.Reasoning != nil && request.Reasoning.Effort != "" {
 		info.SetReasoningEffort(request.Reasoning.Effort)
 	}
+	// OpenCode zen/go and similar Responses-compatible upstreams require every
+	// tool to carry a name; codex's default {"type":"web_search_preview"} is
+	// otherwise rejected with "tools[i].function: missing field `name`". This
+	// only ever adds a name where one is missing, so it is safe for every
+	// channel (native upstreams already send names and are left untouched).
+	if len(request.Tools) > 0 {
+		request.Tools = normalizeResponsesToolsMissingName(request.Tools)
+	}
+	// The two history rewrites below only target non-native Responses upstreams
+	// (CPA-proxied zen/go and other OpenAI-compatible surfaces that do not
+	// implement the full Responses spec). Native providers — OpenAI, Azure,
+	// OpenAI Max — honor the standard Responses history shape, so rewriting
+	// their assistant content or function_call history would be a regression.
+	// Channel type gates keep those upstreams on the original passthrough path.
+	if !isNativeResponsesUpstream(info) {
+		// Such upstreams reject assistant history whose content is an output_text
+		// array (they translate it into an empty assistant message). Flatten those
+		// arrays to plain strings; leave user/system arrays untouched.
+		if normalized, ok := flattenResponsesAssistantContent(request.Input); ok {
+			request.Input = normalized
+		}
+		// DeepSeek thinking mode (via zen/go) demands reasoning_content on every
+		// assistant turn that carries tool_calls, but codex's reasoning items lack
+		// encrypted_content. Rewrite function_call + function_call_output history
+		// pairs into plain assistant/user text so the upstream never enters the
+		// tool_calls translation path. Tool definitions are preserved, so the
+		// current turn can still issue new calls.
+		if rewritten, ok := rewriteResponsesFunctionCallHistory(request.Input); ok {
+			request.Input = rewritten
+		}
+	}
 	return request, nil
+}
+
+// rewriteResponsesFunctionCallHistory rewrites function_call and matching
+// function_call_output history items into plain assistant/user text messages.
+// Only triggers when at least one function_call history item exists. After the
+// rewrite the upstream skips the tool_calls translation path entirely; tool
+// definitions remain so the current turn can still emit new calls.
+func rewriteResponsesFunctionCallHistory(raw json.RawMessage) (json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return raw, false
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return raw, false
+	}
+	hasFunctionCall := false
+	for i := range items {
+		if t, _ := items[i]["type"].(string); t == "function_call" {
+			hasFunctionCall = true
+			break
+		}
+	}
+	if !hasFunctionCall {
+		return raw, false
+	}
+	outputs := make(map[string]string)
+	for i := range items {
+		if t, _ := items[i]["type"].(string); t == "function_call_output" {
+			callID, _ := items[i]["call_id"].(string)
+			if callID != "" {
+				outputs[callID] = flattenResponsesToolOutput(items[i]["output"])
+			}
+		}
+	}
+	changed := false
+	for i := range items {
+		t, _ := items[i]["type"].(string)
+		switch t {
+		case "function_call":
+			name, _ := items[i]["name"].(string)
+			args, _ := items[i]["arguments"].(string)
+			items[i] = map[string]any{
+				"role":    "assistant",
+				"content": "[tool call] " + name + "(" + args + ")",
+			}
+			changed = true
+		case "function_call_output":
+			callID, _ := items[i]["call_id"].(string)
+			out := flattenResponsesToolOutput(items[i]["output"])
+			if out == "" {
+				out = outputs[callID]
+			}
+			items[i] = map[string]any{
+				"role":    "user",
+				"content": "[tool result] " + out,
+			}
+			changed = true
+		}
+	}
+	if !changed {
+		return raw, false
+	}
+	data, err := json.Marshal(items)
+	if err != nil {
+		return raw, false
+	}
+	return data, true
+}
+
+func flattenResponsesToolOutput(raw any) string {
+	switch v := raw.(type) {
+	case string:
+		return v
+	case nil:
+		return ""
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	}
+}
+
+// flattenResponsesAssistantContent flattens role=assistant content arrays in
+// the input into plain strings. Other items are preserved verbatim. Returns
+// (new, true) only when a change occurred, avoiding needless re-serialization.
+func flattenResponsesAssistantContent(raw json.RawMessage) (json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return raw, false
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return raw, false
+	}
+	changed := false
+	for i := range items {
+		role, _ := items[i]["role"].(string)
+		if role != "assistant" {
+			continue
+		}
+		content, ok := items[i]["content"].([]any)
+		if !ok || len(content) == 0 {
+			continue
+		}
+		text := flattenResponsesContentParts(content)
+		if text == "" {
+			// No extractable text in the array: keep a placeholder so the
+			// upstream does not see an empty assistant message.
+			text = " "
+		}
+		items[i]["content"] = text
+		changed = true
+	}
+	if !changed {
+		return raw, false
+	}
+	data, err := json.Marshal(items)
+	if err != nil {
+		return raw, false
+	}
+	return data, true
+}
+
+func flattenResponsesContentParts(parts []any) string {
+	var b strings.Builder
+	for _, raw := range parts {
+		part, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		t, _ := part["type"].(string)
+		if t != "output_text" && t != "input_text" && t != "text" {
+			continue
+		}
+		if text, ok := part["text"].(string); ok {
+			b.WriteString(text)
+		}
+	}
+	return b.String()
+}
+
+// isNativeResponsesUpstream reports whether the channel points at a first-party
+// provider that implements the full Responses spec. The history-rewrite
+// workarounds (assistant content flattening, function_call history rewrite)
+// are only needed for OpenAI-compatible surfaces that translate Responses
+// internally (e.g. CPA-proxied zen/go); applying them to native providers
+// would corrupt their standard multi-turn tool history.
+//
+// Channel type alone is not enough: users routinely register non-official
+// Responses-compatible upstreams (CPA, opencode zen/go) as channel type OpenAI.
+// We therefore gate on the resolved base URL — only genuine api.openai.com and
+// Azure hostnames are treated as native.
+func isNativeResponsesUpstream(info *relaycommon.RelayInfo) bool {
+	if info == nil {
+		return false
+	}
+	baseURL := strings.TrimSpace(info.ChannelBaseUrl)
+	if baseURL == "" {
+		return false
+	}
+	host := baseURL
+	if u, err := url.Parse(baseURL); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	host = strings.ToLower(host)
+	switch {
+	case host == "api.openai.com":
+		return true
+	case strings.HasSuffix(host, ".openai.com"):
+		return true
+	case strings.HasSuffix(host, ".azure.com"),
+		strings.HasSuffix(host, ".cognitiveservices.azure.com"),
+		strings.HasSuffix(host, ".azure-api.net"),
+		strings.HasSuffix(host, ".openai.azure.com"):
+		return true
+	}
+	return false
+}
+
+// normalizeResponsesToolsMissingName fills in a sensible name for tools that
+// lack one. OpenCode zen/go and similar upstreams reject nameless tools, while
+// codex's default web_search_preview / local_shell tools may arrive without a
+// name. Tools that already carry a name (top-level or function.name) are left
+// untouched.
+func normalizeResponsesToolsMissingName(tools json.RawMessage) json.RawMessage {
+	if len(tools) == 0 {
+		return tools
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(tools, &items); err != nil {
+		return tools
+	}
+	changed := false
+	for i := range items {
+		if responsesToolHasName(items[i]) {
+			continue
+		}
+		t, _ := items[i]["type"].(string)
+		items[i]["name"] = defaultResponsesToolName(strings.TrimSpace(t))
+		changed = true
+	}
+	if !changed {
+		return tools
+	}
+	data, err := json.Marshal(items)
+	if err != nil {
+		return tools
+	}
+	return data
+}
+
+func responsesToolHasName(tool map[string]any) bool {
+	if name, _ := tool["name"].(string); strings.TrimSpace(name) != "" {
+		return true
+	}
+	if fn, ok := tool["function"].(map[string]any); ok {
+		if name, _ := fn["name"].(string); strings.TrimSpace(name) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func defaultResponsesToolName(toolType string) string {
+	// web_search variants use their type as the name so multiple web_search
+	// tools do not collide into a single rejected name. local_shell maps to the
+	// codex standard tool name "shell".
+	if toolType == "local_shell" {
+		return "shell"
+	}
+	return toolType
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {

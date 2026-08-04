@@ -117,6 +117,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var responseTextBuilder strings.Builder
 	var toolCount int
 	var usage = &dto.Usage{}
+	var streamUsage *dto.Usage // usage carried by a non-final SSE chunk
 	var lastStreamData string
 	var secondLastStreamData string // 存储倒数第二个stream data，用于音频模型
 	seenStreamToolCalls := make(map[string]struct{})
@@ -144,6 +145,17 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 				logger.LogError(c, "error processing stream token data: "+err.Error())
 				sr.Error(err)
 			}
+			if strings.Contains(data, `"usage"`) {
+				var streamResp struct {
+					Usage *dto.Usage `json:"usage"`
+				}
+				if err := common.UnmarshalJsonStr(data, &streamResp); err == nil && streamResp.Usage != nil {
+					normalizeUsage(streamResp.Usage)
+					if service.ValidUsage(streamResp.Usage) {
+						streamUsage = streamResp.Usage
+					}
+				}
+			}
 		}
 	})
 
@@ -153,14 +165,17 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			Usage *dto.Usage `json:"usage"`
 		}
 		err := common.Unmarshal([]byte(secondLastStreamData), &streamResp)
-		if err == nil && streamResp.Usage != nil && service.ValidUsage(streamResp.Usage) {
-			usage = streamResp.Usage
-			containStreamUsage = true
+		if err == nil && streamResp.Usage != nil {
+			normalizeUsage(streamResp.Usage)
+			if service.ValidUsage(streamResp.Usage) {
+				usage = streamResp.Usage
+				containStreamUsage = true
 
-			if common.DebugEnabled {
-				logger.LogDebug(c, "Audio model usage extracted from second last SSE: PromptTokens=%d, CompletionTokens=%d, TotalTokens=%d, InputTokens=%d, OutputTokens=%d",
-					usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens,
-					usage.InputTokens, usage.OutputTokens)
+				if common.DebugEnabled {
+					logger.LogDebug(c, "Audio model usage extracted from second last SSE: PromptTokens=%d, CompletionTokens=%d, TotalTokens=%d, InputTokens=%d, OutputTokens=%d",
+						usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens,
+						usage.InputTokens, usage.OutputTokens)
+				}
 			}
 		}
 	}
@@ -168,7 +183,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	// 处理最后的响应
 	shouldSendLastResp := true
 	if err := handleLastResponse(lastStreamData, &responseId, &createAt, &systemFingerprint, &model, &usage,
-		&containStreamUsage, info, &shouldSendLastResp); err != nil {
+		&containStreamUsage, info, &shouldSendLastResp, streamUsage); err != nil {
 		logger.LogError(c, fmt.Sprintf("error handling last response: %s, lastStreamData: [%s]", err.Error(), lastStreamData))
 	}
 
@@ -272,6 +287,7 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	}
 
 	usageModified := false
+	normalizeUsage(&simpleResponse.Usage)
 	if simpleResponse.Usage.PromptTokens == 0 {
 		completionTokens := simpleResponse.Usage.CompletionTokens
 		if completionTokens == 0 {

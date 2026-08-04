@@ -114,6 +114,45 @@ func TestLookupBuiltinResponseConverters(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// End-to-end: the Responses→Chat request converter records bridged tool kinds
+// on the shared convmeta options, and the Chat→Responses response converter
+// uses that state to restore native custom_tool_call items.
+func TestResponsesChatBridgeSharesRequestToolContextWithResponseConverter(t *testing.T) {
+	meta := &convmeta.Values{}
+	requestResult, err := ConvertRequest(nil, meta, types.RelayFormatOpenAI, &dto.OpenAIResponsesRequest{
+		Model: "deepseek-v4-flash",
+		Input: []byte(`"patch it"`),
+		Tools: []byte(`[{"type":"custom","name":"apply_patch"}]`),
+	})
+	require.NoError(t, err)
+	chatRequest := requestResult.Value.(*dto.GeneralOpenAIRequest)
+	require.Len(t, chatRequest.Tools, 1)
+	assert.Equal(t, "apply_patch", chatRequest.Tools[0].Function.Name)
+	require.NotNil(t, meta.ConvOptions().ResponsesChatBridge)
+
+	message := dto.Message{Role: "assistant"}
+	message.SetToolCalls([]dto.ToolCallRequest{{
+		ID:   "call_patch",
+		Type: "function",
+		Function: dto.FunctionRequest{
+			Name:      "apply_patch",
+			Arguments: `{"input":"*** Begin Patch\n*** End Patch"}`,
+		},
+	}})
+	responseResult, err := ConvertResponse(nil, meta, types.RelayFormatOpenAIResponses, &dto.OpenAITextResponse{
+		Id:      "chatcmpl_bridge",
+		Model:   "deepseek-v4-flash",
+		Choices: []dto.OpenAITextResponseChoice{{Message: message, FinishReason: "tool_calls"}},
+	})
+	require.NoError(t, err)
+	responses := responseResult.Value.(*dto.OpenAIResponsesResponse)
+	require.Len(t, responses.Output, 1)
+	assert.Equal(t, "custom_tool_call", responses.Output[0].Type)
+	assert.Equal(t, "apply_patch", responses.Output[0].Name)
+	require.NotNil(t, responses.Output[0].Input)
+	assert.Equal(t, "*** Begin Patch\n*** End Patch", *responses.Output[0].Input)
+}
+
 func TestConvertResponseRejectsNilAndUnsupportedRoute(t *testing.T) {
 	_, err := ConvertResponse(nil, nil, types.RelayFormatOpenAI, (*dto.OpenAITextResponse)(nil))
 	require.Error(t, err)
