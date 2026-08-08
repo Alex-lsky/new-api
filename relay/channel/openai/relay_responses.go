@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -32,6 +33,16 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	}
 	if oaiError := responsesResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
+	}
+
+	// OpenCode zen/go strips the reasoning item from DeepSeek thinking-mode
+	// responses. Codex then cannot pass reasoning_content back on the next
+	// turn, which DeepSeek requires in thinking mode. Inject an empty
+	// reasoning item only when the upstream is OpenCode and the response
+	// genuinely lacks one; any other upstream or a response that already
+	// carries reasoning is forwarded byte-for-byte untouched.
+	if isOpencodeUpstream(info) && !hasReasoningOutput(responsesResponse.Output) {
+		responseBody = injectEmptyReasoningBody(responseBody, responsesResponse)
 	}
 
 	// 写入新的 response body
@@ -94,6 +105,13 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	var evtItemDone bool
 	var evtOutputIndex int
 	var evtMsgID string
+	// OpenCode zen/go strips reasoning events from DeepSeek thinking-mode
+	// streams. Track whether the upstream actually emitted any reasoning event
+	// so we only inject when it is genuinely missing; full-event streams pass
+	// through untouched.
+	var evtReasoningSeen bool
+	var evtReasoningInjected bool
+	var evtReasoningID string
 
 	emitSynthetic := func(payload map[string]any) {
 		if b, err := common.Marshal(payload); err == nil {
@@ -123,8 +141,19 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			if streamResponse.OutputIndex != nil {
 				evtOutputIndex = *streamResponse.OutputIndex
 			}
+			// A reasoning output item counts as upstream-provided reasoning.
+			if streamResponse.Item != nil && streamResponse.Item.Type == "reasoning" {
+				evtReasoningSeen = true
+			}
 		case "response.output_item.done":
 			evtItemDone = true
+		case "response.reasoning_summary_text.delta",
+			"response.reasoning_summary_text.done",
+			"response.reasoning_summary_part.added",
+			"response.reasoning_summary_part.done",
+			"response.reasoning_text.delta",
+			"response.reasoning_text.done":
+			evtReasoningSeen = true
 		case "response.output_text.delta":
 			if !evtItemAdded {
 				if evtMsgID == "" {
@@ -155,6 +184,59 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				evtItemAdded = true
 			}
 		case "response.completed", "response.done":
+			// OpenCode zen/go never emits reasoning events; DeepSeek thinking
+			// mode requires codex to pass reasoning_content back on the next
+			// turn. Inject an empty reasoning item sequence before the message
+			// completion events (reasoning keeps output_index 0 and the message
+			// shifts to 1) only when reasoning was genuinely absent. Any stream
+			// that already carried reasoning is left untouched.
+			if isOpencodeUpstream(info) && !evtReasoningSeen && !evtReasoningInjected && evtItemAdded && !evtItemDone {
+				evtReasoningID = "reasoning_" + common.GetUUID()
+				emitSynthetic(map[string]any{
+					"type":         "response.output_item.added",
+					"output_index": 0,
+					"item": map[string]any{
+						"id":      evtReasoningID,
+						"type":    "reasoning",
+						"status":  "in_progress",
+						"content": []any{},
+					},
+				})
+				emitSynthetic(map[string]any{
+					"type":          "response.reasoning_summary_text.delta",
+					"output_index":  0,
+					"summary_index": 0,
+					"delta":         "",
+					"item_id":       evtReasoningID,
+				})
+				emitSynthetic(map[string]any{
+					"type":          "response.reasoning_summary_text.done",
+					"output_index":  0,
+					"summary_index": 0,
+					"item_id":       evtReasoningID,
+					"part": map[string]any{
+						"type": "summary_text",
+						"text": "",
+					},
+				})
+				emitSynthetic(map[string]any{
+					"type":         "response.output_item.done",
+					"output_index": 0,
+					"item": map[string]any{
+						"id":     evtReasoningID,
+						"type":   "reasoning",
+						"status": "completed",
+						"content": []any{map[string]any{
+							"type":        "summary_text",
+							"text":        "",
+							"annotations": []any{},
+						}},
+					},
+				})
+				evtReasoningInjected = true
+				// reasoning owns output_index 0; the message events below shift to 1.
+				evtOutputIndex = 1
+			}
 			if !evtItemDone && evtItemAdded {
 				text := responseTextBuilder.String()
 				emitSynthetic(map[string]any{
@@ -275,4 +357,78 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 
 	return usage, nil
+}
+
+// isOpencodeUpstream reports whether the channel points at OpenCode zen/go.
+// Only this upstream is known to strip reasoning from DeepSeek thinking-mode
+// responses, so the empty-reasoning injection is scoped to it exclusively;
+// every other upstream (including other non-native gateways like CPA) is
+// forwarded untouched.
+func isOpencodeUpstream(info *relaycommon.RelayInfo) bool {
+	if info == nil || info.ChannelMeta == nil {
+		return false
+	}
+	baseURL := strings.TrimSpace(info.ChannelBaseUrl)
+	if baseURL == "" {
+		return false
+	}
+	host := baseURL
+	if u, err := url.Parse(baseURL); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	host = strings.ToLower(host)
+	return host == "opencode.ai" || strings.HasSuffix(host, ".opencode.ai")
+}
+
+// hasReasoningOutput reports whether the response output already carries a
+// reasoning item. If it does, nothing is injected.
+func hasReasoningOutput(outputs []dto.ResponsesOutput) bool {
+	for i := range outputs {
+		if outputs[i].Type == "reasoning" {
+			return true
+		}
+	}
+	return false
+}
+
+// buildEmptyReasoningOutput constructs the empty reasoning item in generic map
+// form so it can be spliced into the raw response body without re-marshaling
+// the DTO (which would drop unknown upstream fields).
+func buildEmptyReasoningOutput(respID string, status string) map[string]any {
+	return map[string]any{
+		"type":   "reasoning",
+		"id":     respID + "_reasoning_0",
+		"status": status,
+		"content": []any{map[string]any{
+			"type":        "summary_text",
+			"text":        "",
+			"annotations": []any{},
+		}},
+	}
+}
+
+// injectEmptyReasoningBody splices an empty reasoning item at the front of the
+// output array of a raw non-stream response body. Operates on the generic map
+// so all unknown upstream fields (service_tier, expires_at, ...) survive;
+// only the output array is touched.
+func injectEmptyReasoningBody(body []byte, resp dto.OpenAIResponsesResponse) []byte {
+	var raw map[string]any
+	if err := common.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+	outputs, ok := raw["output"].([]any)
+	if !ok {
+		return body
+	}
+	status := "completed"
+	if relaycommon.IsNonBillableResponsesStatus(resp.Status) {
+		status = "incomplete"
+	}
+	reasoningItem := buildEmptyReasoningOutput(resp.ID, status)
+	raw["output"] = append([]any{reasoningItem}, outputs...)
+	updated, err := common.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return updated
 }
