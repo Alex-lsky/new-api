@@ -57,6 +57,11 @@ jobs:
             registry.cn-hangzhou.aliyuncs.com/sky-devops/new-api:${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Aliyun personal-edition ACR rejects the OCI attestation manifests
+          # newer buildkit emits (unknown manifest class for
+          # application/vnd.oci.empty.v1+json); disable provenance/SBOM.
+          provenance: false
+          sbom: false
 
       - name: Image summary
         run: |
