@@ -23,6 +23,33 @@ type ChannelSettings struct {
 	// HTTP2ConnectionShards spreads HTTP/2 traffic across N independent transports
 	// (1-8). Zero/unset means 1. Ignored when HTTPProtocol is "http1".
 	HTTP2ConnectionShards int `json:"http2_connection_shards,omitempty"`
+	// StripToolTypes lists OpenAI Responses tool types (e.g. "web_search",
+	// "image_generation") that are removed from requests before they are sent to
+	// this channel. Some OpenAI-compatible upstreams expose /v1/responses but
+	// reject OpenAI hosted tool carriers with a 400; strip those tool types here
+	// so clients like Codex that always declare them keep working. Tool-choice
+	// references and include entries tied to a stripped tool are dropped too.
+	StripToolTypes []string `json:"strip_tool_types,omitempty"`
+}
+
+// StripToolTypeSet returns the normalized strip_tool_types blacklist as a set.
+// Nil means no stripping is configured.
+func (s *ChannelSettings) StripToolTypeSet() map[string]struct{} {
+	if s == nil || len(s.StripToolTypes) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(s.StripToolTypes))
+	for _, toolType := range s.StripToolTypes {
+		toolType = strings.ToLower(strings.TrimSpace(toolType))
+		if toolType == "" {
+			continue
+		}
+		set[toolType] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
 }
 
 const (

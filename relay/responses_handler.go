@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -87,7 +88,24 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
-		requestBody = common.NewReplayableBodyReader(storage)
+		if stripToolTypes := info.ChannelSetting.StripToolTypeSet(); stripToolTypes != nil {
+			raw, err := storage.Bytes()
+			if err == nil {
+				stripped := stripResponsesToolTypes(raw, stripToolTypes)
+				if !bytes.Equal(stripped, raw) {
+					logger.LogDebug(c, "requestBody after strip_tool_types: %s", stripped)
+					body, closer, err := relaycommon.NewOutboundJSONBody(stripped)
+					if err != nil {
+						return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+					}
+					defer closer.Close()
+					requestBody = body
+				}
+			}
+		}
+		if requestBody == nil {
+			requestBody = common.NewReplayableBodyReader(storage)
+		}
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *request)
 		if err != nil {
@@ -111,6 +129,12 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			if err != nil {
 				return newAPIErrorFromParamOverride(err)
 			}
+		}
+
+		// strip channel-blacklisted tool types last so nothing re-introduces
+		// a tool the upstream rejects
+		if stripToolTypes := info.ChannelSetting.StripToolTypeSet(); stripToolTypes != nil {
+			jsonData = stripResponsesToolTypes(jsonData, stripToolTypes)
 		}
 
 		logger.LogDebug(c, "requestBody: %s", jsonData)

@@ -642,3 +642,14 @@ func TestChannelSettingsValidateHTTPTransport(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "http2_connection_shards")
 }
+
+func TestChannelSettingsStripToolTypeSet(t *testing.T) {
+	require.Nil(t, (&ChannelSettings{}).StripToolTypeSet())
+	require.Nil(t, (*ChannelSettings)(nil).StripToolTypeSet())
+	require.Nil(t, (&ChannelSettings{StripToolTypes: []string{"  ", ""}}).StripToolTypeSet(), "blank entries must leave the blacklist empty")
+
+	set := (&ChannelSettings{StripToolTypes: []string{" Web_Search ", "image_generation", "web_search"}}).StripToolTypeSet()
+	require.Len(t, set, 2)
+	assert.Contains(t, set, "web_search")
+	assert.Contains(t, set, "image_generation")
+}

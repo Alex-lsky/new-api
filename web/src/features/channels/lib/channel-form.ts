@@ -264,6 +264,7 @@ export const channelFormSchema = z
     pass_through_body_enabled: z.boolean().optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
+    strip_tool_types: z.string().optional(),
     // Type-specific settings (stored in settings JSON)
     is_enterprise_account: z.boolean().optional(), // OpenRouter specific
     vertex_key_type: z.enum(['json', 'api_key']).optional(), // Vertex AI specific
@@ -436,6 +437,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   pass_through_body_enabled: false,
   system_prompt: '',
   system_prompt_override: false,
+  strip_tool_types: '',
   // Type-specific settings
   is_enterprise_account: false,
   vertex_key_type: 'json',
@@ -476,6 +478,7 @@ export function transformChannelToFormDefaults(
     pass_through_body_enabled: false,
     system_prompt: '',
     system_prompt_override: false,
+    strip_tool_types: '',
   }
 
   if (channel.setting) {
@@ -494,6 +497,9 @@ export function transformChannelToFormDefaults(
         pass_through_body_enabled: parsed.pass_through_body_enabled || false,
         system_prompt: parsed.system_prompt || '',
         system_prompt_override: parsed.system_prompt_override || false,
+        strip_tool_types: Array.isArray(parsed.strip_tool_types)
+          ? parsed.strip_tool_types.join(',')
+          : '',
       }
     } catch (error) {
       // eslint-disable-next-line no-console
@@ -624,6 +630,18 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     settingObj.http_protocol = HTTP_PROTOCOL_HTTP1
   } else if (shards > 1) {
     settingObj.http2_connection_shards = shards
+  }
+
+  const stripToolTypes = [
+    ...new Set(
+      String(formData.strip_tool_types || '')
+        .split(',')
+        .map((toolType) => toolType.trim().toLowerCase())
+        .filter(Boolean)
+    ),
+  ]
+  if (stripToolTypes.length > 0) {
+    settingObj.strip_tool_types = stripToolTypes
   }
 
   return JSON.stringify(settingObj)
