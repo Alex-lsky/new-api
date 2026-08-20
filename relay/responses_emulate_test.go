@@ -284,6 +284,23 @@ func TestRunResponsesEmulationLoopStream(t *testing.T) {
 	assert.Contains(t, client, `"type":"web_search_call"`, "search item restored for the client")
 	assert.Contains(t, client, `"query":"latest go version"`)
 	assert.Contains(t, client, "Go 1.24", "final answer forwarded")
+	// the terminal completed event must carry the restored search item in its
+	// output array too, so clients that rebuild from completed.output see it
+	var completedOutput []string
+	for _, block := range strings.Split(client, "\n\n") {
+		if !strings.Contains(block, "event: response.completed") {
+			continue
+		}
+		for _, l := range strings.Split(block, "\n") {
+			if !strings.HasPrefix(l, "data: ") {
+				continue
+			}
+			for _, t := range gjson.Get(strings.TrimPrefix(l, "data: "), "response.output.#.type").Array() {
+				completedOutput = append(completedOutput, t.String())
+			}
+		}
+	}
+	assert.Equal(t, []string{"web_search_call"}, completedOutput, "restored item present in completed event output")
 	// the final message events must be shifted past the spliced search item
 	completedIdx := strings.Index(client, "response.completed")
 	messageIdx := strings.Index(client, `"type":"message"`)

@@ -862,6 +862,10 @@ func flushFinalResponse(c *gin.Context, captured []byte, calls []emulatedToolCal
 	}
 
 	indexShift := len(calls)
+	prepended := make([]map[string]any, 0, len(calls))
+	for _, call := range calls {
+		prepended = append(prepended, restoredToolItem(call))
+	}
 	inserted := false
 	for _, frame := range splitSSEFrames(captured) {
 		if len(bytes.TrimSpace(frame)) == 0 {
@@ -882,7 +886,7 @@ func flushFinalResponse(c *gin.Context, captured []byte, calls []emulatedToolCal
 				continue
 			}
 		}
-		shifted, err := shiftFrameIndexes(frame, indexShift, totalUsage)
+		shifted, err := shiftFrameIndexes(frame, indexShift, totalUsage, prepended)
 		if err != nil {
 			return err
 		}
@@ -932,10 +936,12 @@ func sseFrameEvent(frame []byte) string {
 }
 
 // shiftFrameIndexes bumps output_index of one SSE frame so spliced-in tool
-// items keep the client's item ordering monotone, and rewrites the terminal
-// event's usage to the summed total.
-func shiftFrameIndexes(frame []byte, indexShift int, totalUsage *dto.Usage) ([]byte, error) {
-	if indexShift == 0 && totalUsage == nil {
+// items keep the client's item ordering monotone, rewrites the terminal
+// event's usage to the summed total, and prepends the restored native tool
+// items to the terminal event's output array so clients that rebuild from
+// response.completed / response.done see them (not just event subscribers).
+func shiftFrameIndexes(frame []byte, indexShift int, totalUsage *dto.Usage, prepended []map[string]any) ([]byte, error) {
+	if indexShift == 0 && totalUsage == nil && len(prepended) == 0 {
 		return frame, nil
 	}
 	eventType := sseFrameEvent(frame)
@@ -950,9 +956,21 @@ func shiftFrameIndexes(frame []byte, indexShift int, totalUsage *dto.Usage) ([]b
 						event["output_index"] = idx + float64(indexShift)
 					}
 				}
-				if totalUsage != nil && (eventType == "response.completed" || eventType == "response.done") {
+				if eventType == "response.completed" || eventType == "response.done" {
 					if response, ok := event["response"].(map[string]any); ok {
-						response["usage"] = summedUsageJSON(totalUsage)
+						if totalUsage != nil {
+							response["usage"] = summedUsageJSON(totalUsage)
+						}
+						if len(prepended) > 0 {
+							output := make([]any, 0, len(prepended))
+							for _, item := range prepended {
+								output = append(output, item)
+							}
+							if existing, ok := response["output"].([]any); ok && len(existing) > 0 {
+								output = append(output, existing...)
+							}
+							response["output"] = output
+						}
 					}
 				}
 				if data, err := common.Marshal(event); err == nil {
