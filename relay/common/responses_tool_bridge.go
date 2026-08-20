@@ -20,6 +20,12 @@ const (
 	// ResponsesClientToolSearch is Codex's tool_search declaration bridged as
 	// a plain function.
 	ResponsesClientToolSearch ResponsesClientToolKind = "tool_search"
+	// ResponsesClientToolWebSearch marks a hosted web_search declaration that
+	// the gateway itself executes (channel emulate_tool_types): the model
+	// calls the bridged function, the gateway runs the configured search
+	// backend and feeds results back, and the final response restores native
+	// web_search_call items for the client.
+	ResponsesClientToolWebSearch ResponsesClientToolKind = "web_search"
 )
 
 // ResponsesClientToolSpec records how a function tool seen by the upstream maps

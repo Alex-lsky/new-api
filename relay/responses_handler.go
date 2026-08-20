@@ -83,7 +83,9 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	}
 	adaptor.Init(info)
 	var requestBody io.Reader
+	var emulatedBaseBody []byte
 	bridgeKinds := info.ChannelSetting.BridgeToolTypeSet()
+	emulateBackend := info.ChannelSetting.EmulatedWebSearchBackend()
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
@@ -149,8 +151,17 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		}
 
 		// strip channel-blacklisted tool types last so nothing re-introduces
-		// a tool the upstream rejects
-		if stripToolTypes := info.ChannelSetting.StripToolTypeSet(); stripToolTypes != nil {
+		// a tool the upstream rejects; emulated tools are exempt because the
+		// gateway rewrites them into functions it can execute itself
+		stripToolTypes := info.ChannelSetting.StripToolTypeSet()
+		if emulateBackend != nil && stripToolTypes != nil {
+			delete(stripToolTypes, "web_search")
+			delete(stripToolTypes, "web_search_preview")
+			if len(stripToolTypes) == 0 {
+				stripToolTypes = nil
+			}
+		}
+		if stripToolTypes != nil {
 			jsonData = stripResponsesToolTypes(jsonData, stripToolTypes)
 		}
 
@@ -167,43 +178,88 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			}
 		}
 
-		logger.LogDebug(c, "requestBody: %s", jsonData)
-		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
-		if err != nil {
-			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		// hosted web_search the gateway executes itself: rewrite the
+		// declaration into a function and remember the backend so the request
+		// runs through the emulation loop instead of a single shot
+		if emulateBackend != nil {
+			bridge := info.ClientToolBridge
+			if bridge == nil {
+				bridge = relaycommon.NewResponsesClientToolBridge()
+			}
+			if emulated := emulateResponsesHostedTools(jsonData, info.ChannelSetting.EmulateToolTypeSet(), bridge); !bytes.Equal(emulated, jsonData) {
+				jsonData = emulated
+				info.ClientToolBridge = bridge
+				info.EmulatedWebSearch = emulateBackend
+				emulatedBaseBody = jsonData
+			}
 		}
-		defer closer.Close()
-		jsonData = nil
-		requestBody = body
+
+		if info.EmulatedWebSearch == nil {
+			logger.LogDebug(c, "requestBody: %s", jsonData)
+			body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			}
+			defer closer.Close()
+			jsonData = nil
+			requestBody = body
+		}
 	}
 
 	var httpResp *http.Response
-	resp, err := adaptor.DoRequest(c, info, requestBody)
-	if err != nil {
-		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
-	}
-
 	statusCodeMappingStr := c.GetString("status_code_mapping")
 
-	if resp != nil {
-		httpResp = resp.(*http.Response)
-
-		if httpResp.StatusCode != http.StatusOK {
-			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
-			// reset status code 重置状态码
-			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
-			return newAPIError
+	var usageDto *dto.Usage
+	if info.EmulatedWebSearch != nil {
+		// gateway-executed hosted tools: iterate upstream rounds, execute the
+		// search calls in between, and only the final round reaches the client
+		usage, loopErr := runResponsesEmulationLoop(c, info,
+			func(body io.Reader) (any, error) {
+				return adaptor.DoRequest(c, info, body)
+			},
+			func(roundResp *http.Response) (*dto.Usage, *types.NewAPIError) {
+				usageAny, apiErr := adaptor.DoResponse(c, roundResp, info)
+				if apiErr != nil {
+					return nil, apiErr
+				}
+				roundUsage, _ := usageAny.(*dto.Usage)
+				if roundUsage == nil {
+					roundUsage = &dto.Usage{}
+				}
+				return roundUsage, nil
+			},
+			emulatedBaseBody, info.EmulatedWebSearch)
+		if loopErr != nil {
+			service.ResetStatusCode(loopErr, statusCodeMappingStr)
+			return loopErr
 		}
+		usageDto = usage
+	} else {
+		resp, err := adaptor.DoRequest(c, info, requestBody)
+		if err != nil {
+			return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+		}
+
+		if resp != nil {
+			httpResp = resp.(*http.Response)
+
+			if httpResp.StatusCode != http.StatusOK {
+				newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
+				// reset status code 重置状态码
+				service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+				return newAPIError
+			}
+		}
+
+		usage, respErr := adaptor.DoResponse(c, httpResp, info)
+		if respErr != nil {
+			// reset status code 重置状态码
+			service.ResetStatusCode(respErr, statusCodeMappingStr)
+			return respErr
+		}
+		usageDto = usage.(*dto.Usage)
 	}
 
-	usage, newAPIError := adaptor.DoResponse(c, httpResp, info)
-	if newAPIError != nil {
-		// reset status code 重置状态码
-		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
-		return newAPIError
-	}
-
-	usageDto := usage.(*dto.Usage)
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact {
 		originModelName := info.OriginModelName
 		originPriceData := info.PriceData

@@ -14,7 +14,25 @@ func testBridge() *relaycommon.ResponsesClientToolBridge {
 	bridge.Register("apply_patch", relaycommon.ResponsesClientToolSpec{Kind: relaycommon.ResponsesClientToolCustom, Name: "apply_patch"})
 	bridge.Register("mcp__search", relaycommon.ResponsesClientToolSpec{Kind: relaycommon.ResponsesClientToolNamespace, Name: "search", Namespace: "mcp"})
 	bridge.Register("tool_search", relaycommon.ResponsesClientToolSpec{Kind: relaycommon.ResponsesClientToolSearch, Name: "tool_search"})
+	bridge.Register("web_search", relaycommon.ResponsesClientToolSpec{Kind: relaycommon.ResponsesClientToolWebSearch, Name: "web_search"})
 	return bridge
+}
+
+func TestRestoreBridgedWebSearchCall(t *testing.T) {
+	body := []byte(`{"output":[{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"web_search","arguments":"{\"query\":\"go 1.24 release date\"}"}]}`)
+	out := restoreBridgedResponsesOutput(body, testBridge())
+	assert.Equal(t, "web_search_call", gjson.GetBytes(out, "output.0.type").String())
+	assert.Equal(t, "go 1.24 release date", gjson.GetBytes(out, "output.0.action.query").String())
+	assert.Equal(t, "search", gjson.GetBytes(out, "output.0.action.type").String())
+	assert.False(t, gjson.GetBytes(out, "output.0.arguments").Exists())
+
+	s := newResponsesStreamToolBridge(testBridge())
+	added, _, forward := s.transformEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":"call_1","name":"web_search"}}`))
+	require.True(t, forward)
+	assert.Equal(t, "web_search_call", gjson.GetBytes(added, "item.type").String())
+
+	_, _, forward = s.transformEvent([]byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"query\""}`))
+	assert.False(t, forward, "web_search argument deltas are suppressed like custom tools")
 }
 
 func TestRestoreBridgedResponsesOutputNonStream(t *testing.T) {

@@ -90,6 +90,13 @@ export interface ChannelSettings {
   http2_connection_shards?: number
   strip_tool_types?: string[]
   bridge_tool_types?: string[]
+  emulate_tool_types?: string[]
+  emulated_tool_backends?: Record<string, {
+    provider?: string
+    api_key?: string
+    model?: string
+    api_base?: string
+  }>
 }
 
 export interface ChannelOtherSettings {

@@ -61,6 +61,11 @@ func restoreBridgedOutputItem(item map[string]any, bridge *relaycommon.Responses
 	case relaycommon.ResponsesClientToolSearch:
 		item["type"] = "tool_search_call"
 		item["execution"] = "client"
+	case relaycommon.ResponsesClientToolWebSearch:
+		item["type"] = "web_search_call"
+		query := webSearchQueryFromArguments(item["arguments"])
+		delete(item, "arguments")
+		item["action"] = map[string]any{"type": "search", "query": query}
 	case relaycommon.ResponsesClientToolNamespace:
 		item["name"] = spec.Name
 		item["namespace"] = spec.Namespace
@@ -68,6 +73,30 @@ func restoreBridgedOutputItem(item map[string]any, bridge *relaycommon.Responses
 		return false
 	}
 	return true
+}
+
+// webSearchQueryFromArguments extracts the query from the bridged function's
+// {"query": ...} arguments; malformed input falls back to the raw string.
+func webSearchQueryFromArguments(arguments any) string {
+	switch value := arguments.(type) {
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return ""
+		}
+		var envelope map[string]any
+		if err := common.Unmarshal([]byte(value), &envelope); err == nil {
+			if query, ok := envelope["query"].(string); ok {
+				return query
+			}
+		}
+		return value
+	default:
+		data, err := common.Marshal(value)
+		if err != nil {
+			return ""
+		}
+		return string(data)
+	}
 }
 
 // customInputFromFunctionArguments unwraps the {"input": ...} envelope the
@@ -140,7 +169,7 @@ func (s *responsesStreamToolBridge) transformEvent(data []byte) ([]byte, [][]byt
 		}
 		return data, nil, true
 	case "response.function_call_arguments.delta":
-		if s.isCustomBridgedEvent(event) {
+		if s.isSilentArgumentsEvent(event) {
 			itemID, _ := event["item_id"].(string)
 			if itemID != "" {
 				buffer, _ := s.argsBuffer[itemID]
@@ -154,7 +183,7 @@ func (s *responsesStreamToolBridge) transformEvent(data []byte) ([]byte, [][]byt
 		}
 		return data, nil, true
 	case "response.function_call_arguments.done":
-		if s.isCustomBridgedEvent(event) {
+		if s.isSilentArgumentsEvent(event) {
 			return data, nil, false
 		}
 		return data, nil, true
@@ -263,9 +292,11 @@ func (s *responsesStreamToolBridge) lookupItemSpec(item map[string]any) (relayco
 	return relaycommon.ResponsesClientToolSpec{}, false
 }
 
-// isCustomBridgedEvent reports whether an arguments delta/done event belongs to
-// a custom-bridged item, by item_id first and output_index as fallback.
-func (s *responsesStreamToolBridge) isCustomBridgedEvent(event map[string]any) bool {
+// isSilentArgumentsEvent reports whether an arguments delta/done event belongs
+// to a bridged item whose native kind does not stream arguments (custom tools
+// carry input via custom_tool_call_input events; web_search_call carries the
+// query inside the item), by item_id first and output_index as fallback.
+func (s *responsesStreamToolBridge) isSilentArgumentsEvent(event map[string]any) bool {
 	spec, ok := s.specs[stringValue(event["item_id"])]
 	if !ok {
 		if index, ok := event["output_index"]; ok {
@@ -277,7 +308,7 @@ func (s *responsesStreamToolBridge) isCustomBridgedEvent(event map[string]any) b
 			}
 		}
 	}
-	return ok && spec.Kind == relaycommon.ResponsesClientToolCustom
+	return ok && (spec.Kind == relaycommon.ResponsesClientToolCustom || spec.Kind == relaycommon.ResponsesClientToolWebSearch)
 }
 
 func stringValue(value any) string {

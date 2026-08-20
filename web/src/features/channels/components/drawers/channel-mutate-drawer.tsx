@@ -294,6 +294,7 @@ const SENSITIVE_FORM_FIELDS = [
   'system_prompt_override',
   'strip_tool_types',
   'bridge_tool_types',
+  'emulate_tool_types',
   'allow_service_tier',
   'disable_store',
   'allow_safety_identifier',
@@ -348,6 +349,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.system_prompt_override ||
     values.strip_tool_types?.trim() ||
     values.bridge_tool_types?.trim() ||
+    values.emulate_tool_types?.trim() ||
     (values.http_protocol && values.http_protocol !== 'auto') ||
     (values.http2_connection_shards != null &&
       values.http2_connection_shards > 1) ||
@@ -4323,6 +4325,30 @@ export function ChannelMutateDrawer({
                                   </FormItem>
                                 )
                               }}
+                            />
+
+                            <FormField
+                              control={form.control}
+                              name='emulate_tool_types'
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>
+                                    {t('Emulate Tool Types')}
+                                  </FormLabel>
+                                  <FormControl>
+                                    <Input
+                                      placeholder={t('e.g. web_search')}
+                                      {...field}
+                                    />
+                                  </FormControl>
+                                  <FormDescription>
+                                    {t(
+                                      'Hosted tools the gateway executes itself. web_search is rewritten into a function for the upstream; when the model calls it the gateway runs the configured search backend (emulated_tool_backends in the setting JSON), feeds results back and iterates until the final answer. Clients see native web_search_call items.'
+                                    )}
+                                  </FormDescription>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
                             />
 
                             <FormField

@@ -266,6 +266,7 @@ export const channelFormSchema = z
     system_prompt_override: z.boolean().optional(),
     strip_tool_types: z.string().optional(),
     bridge_tool_types: z.string().optional(),
+    emulate_tool_types: z.string().optional(),
     // Type-specific settings (stored in settings JSON)
     is_enterprise_account: z.boolean().optional(), // OpenRouter specific
     vertex_key_type: z.enum(['json', 'api_key']).optional(), // Vertex AI specific
@@ -440,6 +441,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   system_prompt_override: false,
   strip_tool_types: '',
   bridge_tool_types: '',
+  emulate_tool_types: '',
   // Type-specific settings
   is_enterprise_account: false,
   vertex_key_type: 'json',
@@ -482,6 +484,7 @@ export function transformChannelToFormDefaults(
     system_prompt_override: false,
     strip_tool_types: '',
     bridge_tool_types: '',
+    emulate_tool_types: '',
   }
 
   if (channel.setting) {
@@ -505,6 +508,9 @@ export function transformChannelToFormDefaults(
           : '',
         bridge_tool_types: Array.isArray(parsed.bridge_tool_types)
           ? parsed.bridge_tool_types.join(',')
+          : '',
+        emulate_tool_types: Array.isArray(parsed.emulate_tool_types)
+          ? parsed.emulate_tool_types.join(',')
           : '',
       }
     } catch (error) {
@@ -660,6 +666,18 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
   ]
   if (bridgeToolTypes.length > 0) {
     settingObj.bridge_tool_types = bridgeToolTypes
+  }
+
+  const emulateToolTypes = [
+    ...new Set(
+      String(formData.emulate_tool_types || '')
+        .split(',')
+        .map((toolType) => toolType.trim().toLowerCase())
+        .filter(Boolean)
+    ),
+  ]
+  if (emulateToolTypes.length > 0) {
+    settingObj.emulate_tool_types = emulateToolTypes
   }
 
   return JSON.stringify(settingObj)

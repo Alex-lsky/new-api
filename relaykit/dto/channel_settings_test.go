@@ -653,3 +653,24 @@ func TestChannelSettingsStripToolTypeSet(t *testing.T) {
 	assert.Contains(t, set, "web_search")
 	assert.Contains(t, set, "image_generation")
 }
+
+func TestChannelSettingsEmulateToolTypes(t *testing.T) {
+	require.Nil(t, (&ChannelSettings{}).EmulateToolTypeSet())
+	require.Nil(t, (*ChannelSettings)(nil).EmulateToolTypeSet())
+
+	set := (&ChannelSettings{EmulateToolTypes: []string{"web_search_preview"}}).EmulateToolTypeSet()
+	require.Len(t, set, 1)
+	assert.Contains(t, set, "web_search", "web_search_preview folds onto web_search")
+
+	require.Nil(t, (&ChannelSettings{EmulateToolTypes: []string{"web_search"}}).EmulatedWebSearchBackend(), "no backend configured")
+	require.Nil(t, (&ChannelSettings{
+		EmulateToolTypes:    []string{"web_search"},
+		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Provider: "gemini"}},
+	}).EmulatedWebSearchBackend(), "backend without api key is unusable")
+	backend := (&ChannelSettings{
+		EmulateToolTypes:    []string{"web_search"},
+		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Provider: "gemini", APIKey: "k", Model: "gemini-2.5-flash"}},
+	}).EmulatedWebSearchBackend()
+	require.NotNil(t, backend)
+	assert.Equal(t, "gemini", backend.Provider)
+}

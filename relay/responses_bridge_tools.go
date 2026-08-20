@@ -106,9 +106,13 @@ func bridgeResponsesToolDeclarations(tools gjson.Result, kinds map[string]struct
 			}
 		}
 		// Plain function tools only occupy their name so a same-named bridged
-		// tool cannot shadow them; the response side never rewrites this kind.
-		if name := responsesBridgedToolName(tool); name != "" {
-			bridge.Register(name, relaycommon.ResponsesClientToolSpec{Kind: relaycommon.ResponsesClientToolFunction, Name: name})
+		// or emulated tool cannot shadow them; the response side never
+		// rewrites this kind. Other pass-through kinds (hosted tools, unknown
+		// types) must not squat on their names.
+		if toolType == "function" {
+			if name := responsesBridgedToolName(tool); name != "" {
+				bridge.Register(name, relaycommon.ResponsesClientToolSpec{Kind: relaycommon.ResponsesClientToolFunction, Name: name})
+			}
 		}
 		newTools = append(newTools, []byte(tool.Raw))
 	}

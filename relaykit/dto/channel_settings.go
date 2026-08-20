@@ -39,6 +39,25 @@ type ChannelSettings struct {
 	// The tools in question are executed by the client, so no execution
 	// capability is needed on the gateway.
 	BridgeToolTypes []string `json:"bridge_tool_types,omitempty"`
+	// EmulateToolTypes lists hosted OpenAI Responses tool types (currently
+	// "web_search" / "web_search_preview") that this gateway executes itself:
+	// the declaration is rewritten into a function tool for the upstream, and
+	// when the model calls it the gateway runs the configured search backend,
+	// feeds the results back and iterates until the final answer. Clients see
+	// native web_search_call items without any client-side configuration.
+	EmulateToolTypes []string `json:"emulate_tool_types,omitempty"`
+	// EmulatedToolBackends configures the executor per emulated tool type.
+	EmulatedToolBackends map[string]EmulatedToolBackend `json:"emulated_tool_backends,omitempty"`
+}
+
+// EmulatedToolBackend is the executor configuration for one emulated hosted
+// tool. Today only the Gemini "Grounding with Google Search" provider exists;
+// api_base exists so tests can point it at a stub.
+type EmulatedToolBackend struct {
+	Provider string `json:"provider,omitempty"`
+	APIKey   string `json:"api_key,omitempty"`
+	Model    string `json:"model,omitempty"`
+	APIBase  string `json:"api_base,omitempty"`
 }
 
 // StripToolTypeSet returns the normalized strip_tool_types blacklist as a set.
@@ -57,6 +76,43 @@ func (s *ChannelSettings) BridgeToolTypeSet() map[string]struct{} {
 		return nil
 	}
 	return normalizeToolTypeSet(s.BridgeToolTypes)
+}
+
+// EmulateToolTypeSet returns the normalized emulate_tool_types set, with
+// web_search_preview folded onto web_search (they share one executor).
+// Nil means no emulation is configured.
+func (s *ChannelSettings) EmulateToolTypeSet() map[string]struct{} {
+	if s == nil {
+		return nil
+	}
+	set := normalizeToolTypeSet(s.EmulateToolTypes)
+	if set == nil {
+		return nil
+	}
+	if _, ok := set["web_search_preview"]; ok {
+		delete(set, "web_search_preview")
+		set["web_search"] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+// EmulatedWebSearchBackend returns the search backend configuration when
+// web_search emulation is enabled for this channel.
+func (s *ChannelSettings) EmulatedWebSearchBackend() *EmulatedToolBackend {
+	if s == nil {
+		return nil
+	}
+	if _, ok := s.EmulateToolTypeSet()["web_search"]; !ok {
+		return nil
+	}
+	backend := s.EmulatedToolBackends["web_search"]
+	if backend.Provider == "" || backend.APIKey == "" {
+		return nil
+	}
+	return &backend
 }
 
 func normalizeToolTypeSet(toolTypes []string) map[string]struct{} {
