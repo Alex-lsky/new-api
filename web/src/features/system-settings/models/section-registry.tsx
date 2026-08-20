@@ -188,7 +188,6 @@ const MODELS_SECTIONS = [
     build: (settings: ModelSettings) => (
       <ToolHostingSettingsCard
         providers={settings['tool_hosting.providers'] ?? '{}'}
-        bindings={settings['tool_hosting.bindings'] ?? '{}'}
       />
     ),
   },

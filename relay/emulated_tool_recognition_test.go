@@ -14,15 +14,11 @@ import (
 )
 
 func init() {
-	tool_hosting.SetToolHostingForTest(
-		map[string]tool_hosting.ToolHostingProvider{
-			"g-search": {Kind: tool_hosting.KindWebSearch, Type: "tavily", APIKey: "gk"},
-			"g-vision": {Kind: tool_hosting.KindRecognition, Type: "gemini", APIKey: "gk", Model: "gemini-2.5-flash"},
-		},
-		map[string]map[string]string{
-			"muse-spark-1.2": {"web_search": "g-search", "image_recognition": "g-vision"},
-		},
-	)
+	tool_hosting.SetToolHostingForTest(map[string]tool_hosting.ToolHostingProvider{
+		"g-search": {Kind: tool_hosting.KindWebSearch, Type: "tavily", APIKey: "gk"},
+		"g-vision": {Kind: tool_hosting.KindRecognition, Type: "gemini", APIKey: "gk", Model: "gemini-2.5-flash"},
+		"g-image":  {Kind: tool_hosting.KindImageGeneration, Type: "gemini_images", APIKey: "gk"},
+	})
 }
 
 const testImageURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -123,38 +119,33 @@ func extractImageURLFromBody(body string) string {
 	return rest[:end]
 }
 
-func TestMergeGlobalToolHosting(t *testing.T) {
-	local := map[string]*dto.EmulatedToolBackend{
+func TestResolveEmulatedToolRefs(t *testing.T) {
+	// inline backend kept as-is (no ref)
+	inline := map[string]*dto.EmulatedToolBackend{
 		dto.EmulatedToolTypeWebSearch: {Provider: dto.EmulatedSearchProviderTavily, APIKey: "local"},
 	}
-	strip := map[string]struct{}{}
-	exclude := map[string]struct{}{}
+	resolved := resolveEmulatedToolRefs(inline)
+	require.Len(t, resolved, 1)
+	assert.Equal(t, "local", resolved[dto.EmulatedToolTypeWebSearch].APIKey)
 
-	// local wins when a global binding also exists for the model
-	merged := mergeGlobalToolHosting(local, strip, exclude, true, "ignored-model")
-	require.Len(t, merged, 1)
-	assert.Equal(t, "local", merged[dto.EmulatedToolTypeWebSearch].APIKey)
+	// refs resolve to the global provider config, including channel/model
+	referenced := map[string]*dto.EmulatedToolBackend{
+		dto.EmulatedToolTypeWebSearch:   {Ref: "g-search"},
+		dto.EmulatedToolTypeRecognition: {Ref: "g-vision"},
+		dto.EmulatedToolTypeImage:       {Ref: "g-image"},
+	}
+	resolved = resolveEmulatedToolRefs(referenced)
+	require.Len(t, resolved, 3)
+	assert.Equal(t, "tavily", resolved[dto.EmulatedToolTypeWebSearch].Provider)
+	assert.Equal(t, "gk", resolved[dto.EmulatedToolTypeWebSearch].APIKey)
+	assert.Equal(t, "gemini", resolved[dto.EmulatedToolTypeRecognition].Provider)
+	assert.Equal(t, "gemini-2.5-flash", resolved[dto.EmulatedToolTypeRecognition].Model)
+	assert.Equal(t, "gemini_images", resolved[dto.EmulatedToolTypeImage].Provider)
 
-	// no local config + global binding for the model -> global backend added
-	merged = mergeGlobalToolHosting(nil, strip, exclude, true, "muse-spark-1.2")
-	require.NotNil(t, merged)
-	assert.Equal(t, "tavily", merged[dto.EmulatedToolTypeWebSearch].Provider)
-	assert.Contains(t, merged, dto.EmulatedToolTypeRecognition, "recognition binding materialized")
-	require.NotNil(t, merged[dto.EmulatedToolTypeRecognition])
-
-	// inheritance disabled -> nothing from global
-	require.Nil(t, mergeGlobalToolHosting(nil, strip, exclude, false, "muse-spark-1.2"))
-
-	// no binding for the model -> nil
-	require.Nil(t, mergeGlobalToolHosting(nil, strip, exclude, true, "unknown-model"))
-
-	// stripped kind is not emulated via global
-	merged = mergeGlobalToolHosting(nil, map[string]struct{}{dto.EmulatedToolTypeWebSearch: {}}, exclude, true, "muse-spark-1.2")
-	_, hasSearch := merged[dto.EmulatedToolTypeWebSearch]
-	require.False(t, hasSearch, "stripped kind excluded from global emulation")
-
-	// excluded kind is not emulated via global
-	merged = mergeGlobalToolHosting(nil, strip, map[string]struct{}{dto.EmulatedToolTypeRecognition: {}}, true, "muse-spark-1.2")
-	_, hasRecognition := merged[dto.EmulatedToolTypeRecognition]
-	require.False(t, hasRecognition, "excluded kind excluded from global emulation")
+	// unknown ref or kind mismatch -> dropped, never a request failure
+	dropped := resolveEmulatedToolRefs(map[string]*dto.EmulatedToolBackend{
+		dto.EmulatedToolTypeWebSearch: {Ref: "missing"},
+		dto.EmulatedToolTypeImage:     {Ref: "g-search"},
+	})
+	require.Nil(t, dropped)
 }

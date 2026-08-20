@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
-import { Pencil, Trash2 } from 'lucide-react'
+import { Trash2 } from 'lucide-react'
 import { memo, useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -31,7 +31,6 @@ import {
   SelectContent,
   SelectGroup,
   SelectItem,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
@@ -40,7 +39,6 @@ import { getChannels } from '@/features/channels/api'
 import { useUpdateOption } from '../hooks/use-update-option'
 
 const PROVIDERS_OPTION_KEY = 'tool_hosting.providers'
-const BINDINGS_OPTION_KEY = 'tool_hosting.bindings'
 
 const TOOL_KINDS = [
   'web_search',
@@ -50,7 +48,7 @@ const TOOL_KINDS = [
 
 type ToolKind = (typeof TOOL_KINDS)[number]
 
-// Standard executors valid per tool kind.
+// Executors valid per tool kind.
 const EXECUTORS: Record<ToolKind, string[]> = {
   web_search: [
     'gemini',
@@ -60,46 +58,46 @@ const EXECUTORS: Record<ToolKind, string[]> = {
     'bocha',
     'searxng',
     'http_json',
-    'channel',
   ],
-  image_recognition: ['gemini', 'openai', 'channel'],
-  image_generation: ['openai_images', 'gemini_images', 'channel'],
-}
-
-const CHANNEL_EXECUTOR_HINT: Record<ToolKind, string[]> = {
-  web_search: ['gemini', 'zhipu', 'tavily', 'brave', 'bocha', 'http_json'],
   image_recognition: ['gemini', 'openai'],
   image_generation: ['openai_images', 'gemini_images'],
 }
 
-// Search providers where a model field makes no sense.
-const MODELLESS_SEARCH_TYPES = new Set(['tavily', 'brave', 'bocha'])
+// Executors that run through a model: channel-backed credentials (and a model
+// selection) make sense for them — e.g. Google search is really a gemini model.
+const MODEL_EXECUTORS = new Set([
+  'gemini',
+  'openai',
+  'openai_images',
+  'gemini_images',
+  'zhipu', // model field selects the search engine
+])
+
+const KEYLESS_EXECUTORS = new Set(['searxng', 'http_json'])
 
 type ProviderRow = {
   uid: string
   name: string
   kind: string
   type: string
+  credentials: 'channel' | 'manual'
   channel_id: string
-  executor: string
-  api_key: string
   model: string
+  api_key: string
   api_base: string
   request_body: string
   result_path: string
 }
 
-type BindingRow = {
-  id: number
-  channel: string
-  model: string
-  custom: boolean
-  web_search: string
-  image_recognition: string
-  image_generation: string
+type RawProviderOption = {
+  kind?: string
+  type?: string
+  channel_id?: number
+  model?: string
+  api_key?: string
+  api_base?: string
+  extra?: Record<string, string>
 }
-
-type RawProviderOption = ProviderRow & { extra?: Record<string, string> }
 
 let uidCounter = 0
 
@@ -108,16 +106,17 @@ function nextUid(): string {
   return `uid-${Date.now().toString(36)}-${uidCounter}`
 }
 
-function emptyProvider(): ProviderRow {
+function emptyProvider(kind: ToolKind = 'web_search'): ProviderRow {
+  const type = EXECUTORS[kind][0] || 'gemini'
   return {
     uid: nextUid(),
     name: '',
-    kind: 'web_search',
-    type: 'tavily',
+    kind,
+    type,
+    credentials: MODEL_EXECUTORS.has(type) ? 'channel' : 'manual',
     channel_id: '',
-    executor: '',
-    api_key: '',
     model: '',
+    api_key: '',
     api_base: '',
     request_body: '',
     result_path: '',
@@ -134,8 +133,7 @@ function parseOptionObject<T>(value: string): T {
 }
 
 function providersFromOptions(value: string): ProviderRow[] {
-  const raw =
-    parseOptionObject<Record<string, Partial<RawProviderOption>>>(value)
+  const raw = parseOptionObject<Record<string, RawProviderOption>>(value)
   return Object.entries(raw)
     .filter(([name]) => name.trim())
     .map(([name, provider], index) => ({
@@ -143,29 +141,14 @@ function providersFromOptions(value: string): ProviderRow[] {
       name,
       kind: provider.kind || 'web_search',
       type: provider.type || 'tavily',
+      credentials:
+        provider.channel_id && provider.channel_id > 0 ? 'channel' : 'manual',
       channel_id: provider.channel_id ? String(provider.channel_id) : '',
-      executor: provider.executor || '',
-      api_key: provider.api_key || '',
       model: provider.model || '',
+      api_key: provider.api_key || '',
       api_base: provider.api_base || '',
-      request_body: provider.request_body || provider.extra?.request_body || '',
-      result_path: provider.result_path || provider.extra?.result_path || '',
-    }))
-}
-
-function bindingsFromOptions(value: string): BindingRow[] {
-  const raw =
-    parseOptionObject<Record<string, Partial<Record<ToolKind, string>>>>(value)
-  return Object.entries(raw)
-    .filter(([model]) => model.trim())
-    .map(([model, kinds], index) => ({
-      id: index,
-      channel: '',
-      model,
-      custom: true,
-      web_search: kinds.web_search || '',
-      image_recognition: kinds.image_recognition || '',
-      image_generation: kinds.image_generation || '',
+      request_body: provider.extra?.request_body || '',
+      result_path: provider.extra?.result_path || '',
     }))
 }
 
@@ -174,9 +157,9 @@ function providerToOption(provider: ProviderRow): Record<string, unknown> {
     kind: provider.kind,
     type: provider.type,
   }
-  if (provider.type === 'channel') {
+  if (provider.credentials === 'channel' && provider.channel_id) {
     base.channel_id = Number(provider.channel_id) || 0
-    base.executor = provider.executor
+    if (provider.model.trim()) base.model = provider.model.trim()
     return base
   }
   if (provider.api_key.trim()) base.api_key = provider.api_key.trim()
@@ -204,20 +187,6 @@ function providersToOption(rows: ProviderRow[]): Record<string, unknown> {
   return out
 }
 
-function bindingsToOption(rows: BindingRow[]): Record<string, unknown> {
-  const out: Record<string, unknown> = {}
-  for (const row of rows) {
-    if (!row.model.trim()) continue
-    const kinds: Record<string, string> = {}
-    for (const kind of TOOL_KINDS) {
-      const provider = row[kind]
-      if (provider) kinds[kind] = provider
-    }
-    if (Object.keys(kinds).length > 0) out[row.model.trim()] = kinds
-  }
-  return out
-}
-
 function channelModels(models: string | undefined): string[] {
   if (!models) return []
   const seen = new Set<string>()
@@ -234,18 +203,13 @@ function channelModels(models: string | undefined): string[] {
 
 function ToolHostingSettingsCard({
   providers: providersOption,
-  bindings: bindingsOption,
 }: {
   providers: string
-  bindings: string
 }) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const [providers, setProviders] = useState<ProviderRow[]>(() =>
     providersFromOptions(providersOption)
-  )
-  const [bindings, setBindings] = useState<BindingRow[]>(() =>
-    bindingsFromOptions(bindingsOption)
   )
   const [saving, setSaving] = useState(false)
 
@@ -275,27 +239,12 @@ function ToolHostingSettingsCard({
     []
   )
 
-  const updateBinding = useCallback(
-    (index: number, patch: Partial<BindingRow>) => {
-      setBindings((prev) =>
-        prev.map((row, i) => (i === index ? { ...row, ...patch } : row))
-      )
-    },
-    []
-  )
-
   const save = useCallback(async () => {
     setSaving(true)
     try {
-      const providerValue = JSON.stringify(providersToOption(providers))
-      const bindingValue = JSON.stringify(bindingsToOption(bindings))
       await updateOption.mutateAsync({
         key: PROVIDERS_OPTION_KEY,
-        value: providerValue,
-      })
-      await updateOption.mutateAsync({
-        key: BINDINGS_OPTION_KEY,
-        value: bindingValue,
+        value: JSON.stringify(providersToOption(providers)),
       })
       toast.success(t('Tool hosting settings saved'))
     } catch (error) {
@@ -304,21 +253,14 @@ function ToolHostingSettingsCard({
     } finally {
       setSaving(false)
     }
-  }, [providers, bindings, updateOption, t])
-
-  const kindSelectItems = (kind: ToolKind) => [
-    { value: '', label: t('Not bound') },
-    ...providers
-      .filter((p) => p.kind === kind && p.name)
-      .map((p) => ({ value: p.name, label: p.name })),
-  ]
+  }, [providers, updateOption, t])
 
   return (
     <div className='space-y-6'>
       <Alert>
         <AlertDescription>
           {t(
-            'Global tool hosting configures named search / vision / image-generation providers and binds them to models. Channels inherit these bindings for tool types they do not pin themselves; the channel card "exclude global" opts a channel out.'
+            "Define named tool providers here. Search / vision / image-generation providers that run through a model (e.g. Google search = a Gemini model) can borrow an existing channel's credentials and pick its model; plain APIs just need an API key. Channels then select which provider substitutes each hosted tool."
           )}
         </AlertDescription>
       </Alert>
@@ -332,12 +274,9 @@ function ToolHostingSettingsCard({
             </p>
           )}
           {providers.map((provider, index) => {
-            const showsModel =
-              provider.type === 'channel' ||
-              !(
-                provider.kind === 'web_search' &&
-                MODELLESS_SEARCH_TYPES.has(provider.type)
-              )
+            const isModelType = MODEL_EXECUTORS.has(provider.type)
+            const isKeyless = KEYLESS_EXECUTORS.has(provider.type)
+            const models = modelsByChannel.get(provider.channel_id) ?? []
             return (
               <div
                 key={provider.uid}
@@ -359,15 +298,19 @@ function ToolHostingSettingsCard({
                       label: kind,
                     }))}
                     value={provider.kind}
-                    onValueChange={(kind) =>
+                    onValueChange={(kind) => {
+                      const nextKind = (kind ?? 'web_search') as ToolKind
+                      const nextType = EXECUTORS[nextKind][0] || 'gemini'
                       updateProvider(index, {
-                        kind: kind ?? '',
-                        type:
-                          EXECUTORS[(kind ?? 'web_search') as ToolKind][0] ||
-                          'channel',
-                        executor: '',
+                        kind: nextKind,
+                        type: nextType,
+                        credentials: MODEL_EXECUTORS.has(nextType)
+                          ? 'channel'
+                          : 'manual',
+                        channel_id: '',
+                        model: '',
                       })
-                    }
+                    }}
                   >
                     <SelectTrigger>
                       <SelectValue />
@@ -390,12 +333,17 @@ function ToolHostingSettingsCard({
                       label: type,
                     }))}
                     value={provider.type}
-                    onValueChange={(type) =>
+                    onValueChange={(type) => {
+                      const next = type ?? ''
                       updateProvider(index, {
-                        type: type ?? '',
-                        executor: type === 'channel' ? provider.executor : '',
+                        type: next,
+                        credentials: MODEL_EXECUTORS.has(next)
+                          ? 'channel'
+                          : 'manual',
+                        channel_id: '',
+                        model: '',
                       })
-                    }
+                    }}
                   >
                     <SelectTrigger>
                       <SelectValue />
@@ -412,94 +360,156 @@ function ToolHostingSettingsCard({
                   </Select>
                 </Field>
 
-                {provider.type === 'channel' ? (
+                {isModelType ? (
                   <>
                     <Field className='col-span-3'>
                       <Select
-                        items={channelItems.length > 0 ? channelItems : []}
-                        value={provider.channel_id || ''}
-                        onValueChange={(value) =>
-                          updateProvider(index, { channel_id: value ?? '' })
+                        items={[
+                          {
+                            value: 'channel',
+                            label: t('Use existing channel'),
+                          },
+                          { value: 'manual', label: t('Direct API') },
+                        ]}
+                        value={provider.credentials}
+                        onValueChange={(credentials) =>
+                          updateProvider(index, {
+                            credentials: (credentials ?? 'manual') as
+                              | 'channel'
+                              | 'manual',
+                            channel_id: '',
+                          })
                         }
                       >
                         <SelectTrigger>
-                          <SelectValue
-                            placeholder={
-                              channelItems.length > 0
-                                ? t('Select channel')
-                                : t('No channels available')
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent alignItemWithTrigger={false}>
+                          <SelectGroup>
+                            <SelectItem value='channel'>
+                              {t('Use existing channel')}
+                            </SelectItem>
+                            <SelectItem value='manual'>
+                              {t('Direct API')}
+                            </SelectItem>
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    {provider.credentials === 'channel' ? (
+                      <>
+                        <Field className='col-span-2'>
+                          <Select
+                            items={channelItems}
+                            value={provider.channel_id}
+                            onValueChange={(value) =>
+                              updateProvider(index, {
+                                channel_id: value ?? '',
+                                model: '',
+                              })
+                            }
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder={t('Select channel')} />
+                            </SelectTrigger>
+                            <SelectContent alignItemWithTrigger={false}>
+                              <SelectGroup>
+                                {channelItems.map((item) => (
+                                  <SelectItem
+                                    key={item.value}
+                                    value={item.value}
+                                  >
+                                    {item.label}
+                                  </SelectItem>
+                                ))}
+                              </SelectGroup>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                        <Field className='col-span-2'>
+                          <Select
+                            items={models.map((model) => ({
+                              value: model,
+                              label: model,
+                            }))}
+                            value={provider.model}
+                            onValueChange={(value) =>
+                              updateProvider(index, { model: value ?? '' })
+                            }
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder={t('Select model')} />
+                            </SelectTrigger>
+                            <SelectContent alignItemWithTrigger={false}>
+                              <SelectGroup>
+                                {models.map((model) => (
+                                  <SelectItem key={model} value={model}>
+                                    {model}
+                                  </SelectItem>
+                                ))}
+                              </SelectGroup>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                      </>
+                    ) : (
+                      <>
+                        <Field className='col-span-2'>
+                          <Input
+                            type='password'
+                            autoComplete='new-password'
+                            placeholder={t('API key')}
+                            value={provider.api_key}
+                            onChange={(event) =>
+                              updateProvider(index, {
+                                api_key: event.target.value,
+                              })
                             }
                           />
-                        </SelectTrigger>
-                        <SelectContent alignItemWithTrigger={false}>
-                          <SelectGroup>
-                            {channelItems.map((item) => (
-                              <SelectItem key={item.value} value={item.value}>
-                                {item.label}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                    </Field>
-                    <Field className='col-span-2'>
-                      <Select
-                        items={(
-                          CHANNEL_EXECUTOR_HINT[provider.kind as ToolKind] || []
-                        ).map((executor) => ({
-                          value: executor,
-                          label: executor,
-                        }))}
-                        value={provider.executor}
-                        onValueChange={(executor) =>
-                          updateProvider(index, { executor: executor ?? '' })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder={t('Executor')} />
-                        </SelectTrigger>
-                        <SelectContent alignItemWithTrigger={false}>
-                          <SelectGroup>
-                            {(
-                              CHANNEL_EXECUTOR_HINT[
-                                provider.kind as ToolKind
-                              ] || []
-                            ).map((executor) => (
-                              <SelectItem key={executor} value={executor}>
-                                {executor}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                    </Field>
+                        </Field>
+                        <Field className='col-span-2'>
+                          <Input
+                            placeholder={
+                              provider.type === 'zhipu'
+                                ? 'search_std'
+                                : t('Model')
+                            }
+                            value={provider.model}
+                            onChange={(event) =>
+                              updateProvider(index, {
+                                model: event.target.value,
+                              })
+                            }
+                          />
+                        </Field>
+                      </>
+                    )}
                   </>
                 ) : (
                   <>
-                    <Field className='col-span-2'>
-                      <Input
-                        type='password'
-                        autoComplete='new-password'
-                        placeholder={t('API key')}
-                        value={provider.api_key}
-                        onChange={(event) =>
-                          updateProvider(index, { api_key: event.target.value })
-                        }
-                      />
-                    </Field>
-                    <Field className='col-span-2'>
-                      {showsModel ? (
+                    <Field className='col-span-3'>
+                      {!isKeyless && (
                         <Input
-                          placeholder={
-                            provider.kind === 'web_search' &&
-                            provider.type === 'zhipu'
-                              ? 'search_std'
-                              : t('Model')
-                          }
-                          value={provider.model}
+                          type='password'
+                          autoComplete='new-password'
+                          placeholder={t('API key')}
+                          value={provider.api_key}
                           onChange={(event) =>
                             updateProvider(index, {
-                              model: event.target.value,
+                              api_key: event.target.value,
+                            })
+                          }
+                        />
+                      )}
+                    </Field>
+                    <Field className='col-span-2'>
+                      {isKeyless || provider.type === 'http_json' ? (
+                        <Input
+                          placeholder={t('API base')}
+                          value={provider.api_base}
+                          onChange={(event) =>
+                            updateProvider(index, {
+                              api_base: event.target.value,
                             })
                           }
                         />
@@ -568,189 +578,24 @@ function ToolHostingSettingsCard({
         </div>
       </section>
 
-      <section className='space-y-3'>
-        <h3 className='text-sm font-semibold'>{t('Model bindings')}</h3>
-        <div className='space-y-2'>
-          {bindings.length === 0 && (
-            <p className='text-muted-foreground text-sm'>
-              {t('No model bindings yet.')}
-            </p>
-          )}
-          {bindings.map((row, index) => {
-            const rowModels = modelsByChannel.get(row.channel) ?? []
-            const modelValue = row.custom ? '' : row.model
-            return (
-              <div key={row.id} className='space-y-2 rounded-md border p-2'>
-                <div className='grid grid-cols-12 gap-2'>
-                  <Field className='col-span-5'>
-                    <Select
-                      items={channelItems}
-                      value={row.channel}
-                      onValueChange={(value) =>
-                        updateBinding(index, {
-                          channel: value ?? '',
-                          model: '',
-                          custom: false,
-                        })
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue
-                          placeholder={
-                            channelItems.length > 0
-                              ? t('Select channel')
-                              : t('No channels available')
-                          }
-                        />
-                      </SelectTrigger>
-                      <SelectContent alignItemWithTrigger={false}>
-                        <SelectGroup>
-                          {channelItems.map((item) => (
-                            <SelectItem key={item.value} value={item.value}>
-                              {item.label}
-                            </SelectItem>
-                          ))}
-                        </SelectGroup>
-                      </SelectContent>
-                    </Select>
-                  </Field>
-                  <Field className='col-span-6'>
-                    {row.custom ? (
-                      <Input
-                        placeholder={t('Model or prefix*')}
-                        value={row.model}
-                        onChange={(event) =>
-                          updateBinding(index, { model: event.target.value })
-                        }
-                      />
-                    ) : (
-                      <Select
-                        items={rowModels.map((model) => ({
-                          value: model,
-                          label: model,
-                        }))}
-                        value={modelValue}
-                        onValueChange={(value) =>
-                          updateBinding(index, { model: value ?? '' })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue
-                            placeholder={
-                              row.channel
-                                ? t('Select model')
-                                : t('Select a channel first')
-                            }
-                          />
-                        </SelectTrigger>
-                        <SelectContent alignItemWithTrigger={false}>
-                          <SelectGroup>
-                            <SelectLabel>{t('Models')}</SelectLabel>
-                            {rowModels.map((model) => (
-                              <SelectItem key={model} value={model}>
-                                {model}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                    )}
-                  </Field>
-                  <div className='col-span-1 flex items-start'>
-                    <Button
-                      variant='ghost'
-                      size='icon'
-                      aria-label={t('Toggle custom model input')}
-                      onClick={() =>
-                        updateBinding(index, {
-                          custom: !row.custom,
-                          model: row.custom ? '' : row.model,
-                        })
-                      }
-                    >
-                      <Pencil className='h-4 w-4' />
-                    </Button>
-                  </div>
-                </div>
-                <div className='grid grid-cols-3 gap-2'>
-                  {TOOL_KINDS.map((kind) => (
-                    <Field key={kind}>
-                      <Select
-                        items={kindSelectItems(kind)}
-                        value={row[kind] || ''}
-                        onValueChange={(value) =>
-                          updateBinding(index, { [kind]: value ?? '' })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder={kind} />
-                        </SelectTrigger>
-                        <SelectContent alignItemWithTrigger={false}>
-                          <SelectGroup>
-                            {kindSelectItems(kind).map((item) => (
-                              <SelectItem key={item.value} value={item.value}>
-                                {item.label}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                    </Field>
-                  ))}
-                </div>
-                <div className='flex justify-end'>
-                  <Button
-                    variant='ghost'
-                    size='icon'
-                    aria-label={t('Remove binding')}
-                    onClick={() =>
-                      setBindings((prev) => prev.filter((_, i) => i !== index))
-                    }
-                  >
-                    <Trash2 className='h-4 w-4' />
-                  </Button>
-                </div>
-              </div>
-            )
-          })}
-          <Button
-            variant='outline'
-            size='sm'
-            onClick={() =>
-              setBindings((prev) => [
-                ...prev,
-                {
-                  id: Date.now(),
-                  channel: channelItems[0]?.value ?? '',
-                  model: '',
-                  custom: false,
-                  web_search: '',
-                  image_recognition: '',
-                  image_generation: '',
-                },
-              ])
-            }
-          >
-            {t('Add binding')}
-          </Button>
-        </div>
-      </section>
-
       <div>
         <Button onClick={save} disabled={saving}>
           {saving ? t('Saving...') : t('Save tool hosting settings')}
         </Button>
       </div>
-      {providers.some((p) => p.kind === 'image_recognition') && (
-        <p className='text-muted-foreground text-sm'>
-          {t(
-            'When image_recognition is bound, the gateway injects it as a callable tool; text-only upstreams can then read the images users attach.'
-          )}
-        </p>
-      )}
     </div>
   )
 }
 
+export interface SharedToolProvider {
+  name: string
+  kind?: string
+  type?: string
+}
+
 const MemoToolHostingSettingsCard = memo(ToolHostingSettingsCard)
-export { MemoToolHostingSettingsCard as ToolHostingSettingsCard }
+export {
+  MemoToolHostingSettingsCard as ToolHostingSettingsCard,
+  TOOL_KINDS,
+  EXECUTORS,
+}

@@ -50,17 +50,10 @@ type ChannelSettings struct {
 	// client-side configuration.
 	EmulateToolTypes []string `json:"emulate_tool_types,omitempty"`
 	// EmulatedToolBackends configures the executor per emulated tool type
-	// ("web_search", "image_generation" and "image_recognition" today).
+	// ("web_search", "image_generation" and "image_recognition" today). A
+	// backend either inlines its credentials or references a named provider of
+	// the global tool hosting module via EmulatedToolBackend.Ref.
 	EmulatedToolBackends map[string]EmulatedToolBackend `json:"emulated_tool_backends,omitempty"`
-	// ExcludeToolTypes lists hosted tool types explicitly taken out of global
-	// tool hosting (tool_hosting global bindings) for this channel. Unlike
-	// strip_tool_types, the tool is not removed from the request — it is just
-	// not emulated by the gateway.
-	ExcludeToolTypes []string `json:"exclude_tool_types,omitempty"`
-	// DisableGlobalToolHosting opts this channel out of the global tool hosting
-	// module entirely. Absent (false) means the channel inherits global
-	// per-model bindings for tool types it does not pin itself.
-	DisableGlobalToolHosting bool `json:"disable_global_tool_hosting,omitempty"`
 }
 
 // Web search executor providers for EmulatedToolBackend.Provider when the
@@ -109,14 +102,17 @@ type EmulatedToolBackend struct {
 	APIKey   string `json:"api_key,omitempty"`
 	Model    string `json:"model,omitempty"`
 	APIBase  string `json:"api_base,omitempty"`
-	// ChannelID selects the channel whose key/base_url back this executor when
-	// Provider is "channel". The credentials are resolved at execution time so
+	// Ref names a provider of the global tool hosting module
+	// (tool_hosting.providers). The relay resolves the reference into a
+	// concrete backend at request time; inline fields are ignored while set.
+	Ref string `json:"ref,omitempty"`
+	// ChannelID selects a channel whose key/base_url supply the credentials for
+	// this executor regardless of Provider (e.g. a gemini web_search provider
+	// executing with a channel's model access). Resolved at execution time so
 	// multi-key channels pick a healthy key per call.
 	ChannelID int64 `json:"channel_id,omitempty"`
 	// Executor is the standard executor used with the referenced channel's
-	// credentials when Provider is "channel" (e.g. "gemini", "tavily",
-	// "openai_images"). Recognition backends default to the channel's native
-	// chat endpoint when unset.
+	// credentials when Provider is the legacy "channel" pseudo-provider.
 	Executor string `json:"executor,omitempty"`
 	// Extra carries provider-specific options. Today only the http_json
 	// search provider uses it: "request_body" (JSON template with {query})
@@ -165,12 +161,16 @@ func EmulatedToolProviders(toolType string) map[string]struct{} {
 	}
 }
 
-// backendUsable reports whether the backend can execute. SearXNG and the
-// generic http_json endpoint can run without an API key; a channel reference
-// needs a channel id; every other provider authenticates with one.
+// backendUsable reports whether the backend can execute. A Ref delegates to
+// the global tool hosting module (its own validation applies there). A backend
+// borrowing channel credentials needs a channel id; searxng / http_json run
+// keyless; every other provider authenticates with an API key.
 func backendUsable(toolType string, backend *EmulatedToolBackend) bool {
 	if backend == nil {
 		return false
+	}
+	if strings.TrimSpace(backend.Ref) != "" {
+		return true
 	}
 	provider := strings.ToLower(strings.TrimSpace(backend.Provider))
 	if provider == EmulatedChannelProvider {
@@ -193,6 +193,7 @@ func backendUsable(toolType string, backend *EmulatedToolBackend) bool {
 		return false
 	}
 	return backend.APIKey != "" ||
+		backend.ChannelID > 0 ||
 		strings.EqualFold(provider, EmulatedSearchProviderSearXNG) ||
 		strings.EqualFold(provider, EmulatedSearchProviderHTTPJSON)
 }
@@ -284,23 +285,6 @@ func (s *ChannelSettings) EmulatedRecognitionBackend() *EmulatedToolBackend {
 	return &backend
 }
 
-// ExcludeToolTypeSet returns the normalized exclude_tool_types set.
-func (s *ChannelSettings) ExcludeToolTypeSet() map[string]struct{} {
-	if s == nil {
-		return nil
-	}
-	return normalizeToolTypeSet(s.ExcludeToolTypes)
-}
-
-// GlobalToolHostingEnabled reports whether this channel inherits global tool
-// hosting bindings (absent = enabled).
-func (s *ChannelSettings) GlobalToolHostingEnabled() bool {
-	if s == nil {
-		return true
-	}
-	return !s.DisableGlobalToolHosting
-}
-
 // EmulatedBackendsForRequest returns the executor backends keyed by tool type
 // for every emulated tool this channel configured. Empty map means no local
 // emulated tooling.
@@ -361,6 +345,11 @@ func validateEmulatedBackend(toolType string, backend *EmulatedToolBackend) erro
 	if backend == nil {
 		return fmt.Errorf("emulated_tool_backends.%s is empty", toolType)
 	}
+	// a global provider reference carries its own validation; the relay
+	// additionally verifies existence and kind at save/request time
+	if strings.TrimSpace(backend.Ref) != "" {
+		return nil
+	}
 	provider := strings.ToLower(strings.TrimSpace(backend.Provider))
 	if provider == EmulatedChannelProvider {
 		if backend.ChannelID <= 0 {
@@ -387,8 +376,8 @@ func validateEmulatedBackend(toolType string, backend *EmulatedToolBackend) erro
 	default:
 		return fmt.Errorf("unsupported emulated tool type %q", toolType)
 	}
-	if backend.APIKey == "" && !strings.EqualFold(provider, EmulatedSearchProviderSearXNG) && !strings.EqualFold(provider, EmulatedSearchProviderHTTPJSON) {
-		return fmt.Errorf("emulated_tool_backends.%s.api_key is required for provider %q", toolType, backend.Provider)
+	if backend.APIKey == "" && backend.ChannelID <= 0 && !strings.EqualFold(provider, EmulatedSearchProviderSearXNG) && !strings.EqualFold(provider, EmulatedSearchProviderHTTPJSON) {
+		return fmt.Errorf("emulated_tool_backends.%s.api_key is required for provider %q (or set channel_id to borrow a channel's credentials)", toolType, backend.Provider)
 	}
 	if strings.EqualFold(provider, EmulatedSearchProviderSearXNG) && strings.TrimSpace(backend.APIBase) == "" {
 		return fmt.Errorf("emulated_tool_backends.%s.api_base is required for searxng (your instance URL)", toolType)

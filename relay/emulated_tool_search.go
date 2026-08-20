@@ -45,27 +45,28 @@ func executeEmulatedWebSearch(ctx context.Context, query string, backend *dto.Em
 	if backend == nil {
 		return "web search is not configured on this channel"
 	}
-	var (
-		results searchResults
-		err     error
-	)
-	switch strings.ToLower(strings.TrimSpace(backend.Provider)) {
+	resolved, err := withResolvedChannelCreds(ctx, backend)
+	if err != nil {
+		return "web search failed: " + err.Error()
+	}
+	var results searchResults
+	switch strings.ToLower(strings.TrimSpace(resolved.Provider)) {
 	case dto.EmulatedSearchProviderGemini:
-		results, err = geminiGroundingSearch(ctx, query, backend)
+		results, err = geminiGroundingSearch(ctx, query, resolved)
 	case dto.EmulatedSearchProviderZhipu:
-		results, err = zhipuWebSearch(ctx, query, backend)
+		results, err = zhipuWebSearch(ctx, query, resolved)
 	case dto.EmulatedSearchProviderTavily:
-		results, err = tavilySearch(ctx, query, backend)
+		results, err = tavilySearch(ctx, query, resolved)
 	case dto.EmulatedSearchProviderBrave:
-		results, err = braveSearch(ctx, query, backend)
+		results, err = braveSearch(ctx, query, resolved)
 	case dto.EmulatedSearchProviderBocha:
-		results, err = bochaSearch(ctx, query, backend)
+		results, err = bochaSearch(ctx, query, resolved)
 	case dto.EmulatedSearchProviderSearXNG:
-		results, err = searxngSearch(ctx, query, backend)
+		results, err = searxngSearch(ctx, query, resolved)
 	case dto.EmulatedSearchProviderHTTPJSON:
-		results, err = httpJSONSearch(ctx, query, backend)
+		results, err = httpJSONSearch(ctx, query, resolved)
 	default:
-		return fmt.Sprintf("unsupported web search provider %q", backend.Provider)
+		return fmt.Sprintf("unsupported web search provider %q", resolved.Provider)
 	}
 	if err != nil {
 		return fmt.Sprintf("web search failed: %v", err)

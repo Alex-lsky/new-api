@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/tool_hosting"
 
 	"github.com/samber/lo"
 	"gorm.io/gorm"
@@ -971,6 +972,9 @@ func (channel *Channel) ValidateSettings() error {
 	if err := channelParams.ValidateEmulatedTools(); err != nil {
 		return err
 	}
+	if err := validateEmulatedRefs(channelParams); err != nil {
+		return err
+	}
 	channelOtherSettings := &dto.ChannelOtherSettings{}
 	if channel.OtherSettings != "" {
 		err := common.UnmarshalJsonStr(channel.OtherSettings, channelOtherSettings)
@@ -1153,4 +1157,27 @@ func CountChannelsGroupByType() (map[int64]int64, error) {
 		counts[r.Type] = r.Count
 	}
 	return counts, nil
+}
+
+// validateEmulatedRefs verifies global tool-host provider references used by a
+// channel setting: the referenced provider must exist and its kind must match
+// the emulated tool type it stands in for.
+func validateEmulatedRefs(settings *dto.ChannelSettings) error {
+	if settings == nil {
+		return nil
+	}
+	for kind, backend := range settings.EmulatedToolBackends {
+		ref := strings.TrimSpace(backend.Ref)
+		if ref == "" {
+			continue
+		}
+		provider, ok := tool_hosting.GetProvider(ref)
+		if !ok {
+			return fmt.Errorf("emulated_tool_backends.%s.ref %q is not a configured tool hosting provider", kind, ref)
+		}
+		if string(provider.Kind) != kind {
+			return fmt.Errorf("emulated_tool_backends.%s.ref %q is a %s provider, not %s", kind, ref, provider.Kind, kind)
+		}
+	}
+	return nil
 }

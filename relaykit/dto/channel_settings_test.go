@@ -771,14 +771,28 @@ func TestChannelSettingsEmulatedRecognitionAndChannel(t *testing.T) {
 	}).ValidateEmulatedTools(), "keyed recognition provider without key")
 }
 
-func TestChannelSettingsExcludeAndInherit(t *testing.T) {
-	require.Nil(t, (&ChannelSettings{}).ExcludeToolTypeSet())
-	require.Nil(t, (*ChannelSettings)(nil).ExcludeToolTypeSet())
-	require.True(t, (&ChannelSettings{}).GlobalToolHostingEnabled(), "absent flag means inherit")
-	require.True(t, (*ChannelSettings)(nil).GlobalToolHostingEnabled())
-	require.False(t, (&ChannelSettings{DisableGlobalToolHosting: true}).GlobalToolHostingEnabled())
+func TestChannelSettingsEmulatedRefBackend(t *testing.T) {
+	// ref backends are usable and pass validation (existence is checked at
+	// channel save time in the root module)
+	backend := (&ChannelSettings{
+		EmulateToolTypes:     []string{"web_search"},
+		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Ref: "g-search"}},
+	}).EmulatedWebSearchBackend()
+	require.NotNil(t, backend)
+	assert.Equal(t, "g-search", backend.Ref)
 
-	set := (&ChannelSettings{ExcludeToolTypes: []string{"web_search", "image_recognition"}}).ExcludeToolTypeSet()
-	require.Len(t, set, 2)
-	assert.Contains(t, set, "web_search")
+	require.NoError(t, (&ChannelSettings{
+		EmulateToolTypes: []string{"web_search"},
+		EmulatedToolBackends: map[string]EmulatedToolBackend{
+			"web_search": {Ref: "g-search"},
+		},
+	}).ValidateEmulatedTools(), "ref backend validates without inline creds")
+
+	// provider with channel_id needs no api_key
+	require.NoError(t, (&ChannelSettings{
+		EmulateToolTypes: []string{"web_search"},
+		EmulatedToolBackends: map[string]EmulatedToolBackend{
+			"web_search": {Provider: "gemini", ChannelID: 6, Model: "gemini-2.5-flash"},
+		},
+	}).ValidateEmulatedTools(), "channel-backed provider needs no api_key")
 }

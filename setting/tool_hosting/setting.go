@@ -2,7 +2,6 @@ package tool_hosting
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -11,26 +10,21 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Global tool hosting: named tool-executor providers plus per-model bindings.
+// Global tool hosting: a registry of named tool-executor providers.
 //
-// DB keys (options):
-//   tool_hosting.providers  → JSON object { "<provider name>": ToolHostingProvider }
-//   tool_hosting.bindings   → JSON object { "<model or prefix*>": { "<kind>": "<provider name>" } }
+// DB key (option):
+//   tool_hosting.providers → JSON object { "<provider name>": ToolHostingProvider }
 //
-// Providers are single-purpose: each has one Kind (web_search,
-// image_recognition, or image_generation). A provider's Type is either a
-// standard executor name (e.g. tavily, gemini) or "channel", which borrows the
-// credentials of an existing channel (ChannelID) at execution time.
-//
-// Bindings select, per model (exact name or longest matching "*" prefix), which
-// provider executes each hosted tool kind. Channels inherit the global binding
-// unless they pin the tool locally or opt out; unmatched models are untouched.
+// A provider names the executor Type for one hosted tool Kind (web_search,
+// image_recognition, image_generation). Types that execute through a model
+// (gemini grounding, gemini/openai vision, image generation) may borrow an
+// existing channel's credentials via ChannelID and pick the Model to use;
+// plain API providers (tavily, zhipu, brave, bocha) just carry an APIKey.
+// Channels reference a provider by name from their emulated_tool_backends
+// (EmulatedToolBackend.Ref); enabling tool substitution stays at the channel.
 // ---------------------------------------------------------------------------
 
-const (
-	ProvidersOptionKey = "tool_hosting.providers"
-	BindingsOptionKey  = "tool_hosting.bindings"
-)
+const ProvidersOptionKey = "tool_hosting.providers"
 
 // Tool kind a hosted-tool provider can execute.
 type ToolKind string
@@ -44,34 +38,35 @@ const (
 // ToolHostingProvider configures one named tool executor.
 type ToolHostingProvider struct {
 	Kind ToolKind `json:"kind"`
-	// Type is a standard executor name (gemini/zhipu/tavily/brave/bocha/
-	// searxng/http_json for kind web_search; gemini/openai for
-	// image_recognition; openai_images/gemini_images for image_generation)
-	// or "channel".
+	// Type is the executor: gemini/zhipu/tavily/brave/bocha/searxng/http_json
+	// for web_search; gemini/openai for image_recognition;
+	// openai_images/gemini_images for image_generation.
 	Type string `json:"type"`
-	// ChannelID selects the channel whose key/base_url back this provider
-	// when Type is "channel".
+	// ChannelID optionally borrows this channel's key/base_url as the
+	// credentials (resolved at execution time). Used with model-executing
+	// types, e.g. gemini grounding through a channel's model access.
 	ChannelID int64 `json:"channel_id,omitempty"`
-	// Executor is the standard executor used with the referenced channel's
-	// credentials (required for web_search/image_generation when Type is
-	// "channel"; optional for image_recognition, defaulting to the channel's
-	// native chat endpoint).
-	Executor string            `json:"executor,omitempty"`
-	APIKey   string            `json:"api_key,omitempty"`
-	Model    string            `json:"model,omitempty"`
-	APIBase  string            `json:"api_base,omitempty"`
-	Extra    map[string]string `json:"extra,omitempty"`
+	// Model is the executor model (gemini grounding / vision / image model;
+	// for zhipu it selects the search engine). Optional — providers pick a
+	// default when empty.
+	Model string `json:"model,omitempty"`
+	// APIKey authenticates providers that are not channel-backed.
+	APIKey string `json:"api_key,omitempty"`
+	// APIBase overrides the provider's default endpoint (tests point it at a
+	// stub).
+	APIBase string `json:"api_base,omitempty"`
+	// Extra carries provider-specific options (http_json request_body /
+	// result_path).
+	Extra map[string]string `json:"extra,omitempty"`
 }
 
 // ToolHostingSetting is managed by config.GlobalConfig.Register.
 type ToolHostingSetting struct {
 	Providers map[string]ToolHostingProvider `json:"providers"`
-	Bindings  map[string]map[string]string   `json:"bindings"`
 }
 
 var toolHostingSetting = ToolHostingSetting{
 	Providers: make(map[string]ToolHostingProvider),
-	Bindings:  make(map[string]map[string]string),
 }
 
 func init() {
@@ -83,14 +78,8 @@ func init() {
 // Precomputed lookup index (atomic pointer, lock-free on the request path)
 // ---------------------------------------------------------------------------
 
-type bindEntry struct {
-	modelKey string
-	kinds    map[string]string
-}
-
 type toolHostingIndex struct {
 	providers map[string]ToolHostingProvider
-	bindings  []bindEntry // sorted by modelKey length desc
 }
 
 var currentIndex atomic.Pointer[toolHostingIndex]
@@ -102,30 +91,7 @@ func RebuildToolHostingIndex() {
 	for name, provider := range toolHostingSetting.Providers {
 		providers[strings.TrimSpace(name)] = provider
 	}
-	entries := make([]bindEntry, 0, len(toolHostingSetting.Bindings))
-	for modelKey, kinds := range toolHostingSetting.Bindings {
-		modelKey = strings.TrimSpace(modelKey)
-		if modelKey == "" || len(kinds) == 0 {
-			continue
-		}
-		entry := bindEntry{modelKey: strings.TrimSuffix(modelKey, "*"), kinds: make(map[string]string, len(kinds))}
-		for kind, providerName := range kinds {
-			if kind == "" || providerName == "" {
-				continue
-			}
-			entry.kinds[kind] = providerName
-		}
-		if len(entry.kinds) > 0 {
-			entries = append(entries, entry)
-		}
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if len(entries[i].modelKey) == len(entries[j].modelKey) {
-			return entries[i].modelKey < entries[j].modelKey
-		}
-		return len(entries[i].modelKey) > len(entries[j].modelKey)
-	})
-	currentIndex.Store(&toolHostingIndex{providers: providers, bindings: entries})
+	currentIndex.Store(&toolHostingIndex{providers: providers})
 }
 
 func loadIndex() *toolHostingIndex {
@@ -137,27 +103,7 @@ func loadIndex() *toolHostingIndex {
 	return idx
 }
 
-// LookupBinding returns the provider name bound to kind for modelName, using
-// the longest model-key prefix (an exact model name wins over shorter
-// prefixes). Empty means no binding.
-func LookupBinding(kind ToolKind, modelName string) string {
-	idx := loadIndex()
-	if idx == nil || len(idx.bindings) == 0 || modelName == "" {
-		return ""
-	}
-	kindStr := string(kind)
-	for _, entry := range idx.bindings {
-		if !strings.HasPrefix(modelName, entry.modelKey) {
-			continue
-		}
-		if providerName, ok := entry.kinds[kindStr]; ok {
-			return providerName
-		}
-	}
-	return ""
-}
-
-// GetProvider returns a named tool provider, normalized by lookup.
+// GetProvider returns a named tool provider.
 func GetProvider(name string) (ToolHostingProvider, bool) {
 	idx := loadIndex()
 	if idx == nil {
@@ -177,29 +123,14 @@ func GetProviders() map[string]ToolHostingProvider {
 	return out
 }
 
-// GetBindings returns the full bindings map for admin UI.
-func GetBindings() map[string]map[string]string {
-	setting := toolHostingSetting
-	out := make(map[string]map[string]string, len(setting.Bindings))
-	for modelKey, kinds := range setting.Bindings {
-		copied := make(map[string]string, len(kinds))
-		for kind, providerName := range kinds {
-			copied[kind] = providerName
-		}
-		out[modelKey] = copied
-	}
-	return out
-}
-
 // ---------------------------------------------------------------------------
 // Validation and loading
 // ---------------------------------------------------------------------------
 
 func executorSet(kind ToolKind) map[string]struct{} {
 	base := map[string]struct{}{
-		"channel": {},
-		"gemini":  {},
-		"openai":  {},
+		"gemini": {},
+		"openai": {},
 	}
 	switch kind {
 	case KindWebSearch:
@@ -207,7 +138,7 @@ func executorSet(kind ToolKind) map[string]struct{} {
 			base[executor] = struct{}{}
 		}
 	case KindRecognition:
-		// gemini / openai / channel
+		// gemini / openai
 	case KindImageGeneration:
 		base["openai_images"] = struct{}{}
 		base["gemini_images"] = struct{}{}
@@ -230,17 +161,10 @@ func isValidToolKind(kind string) bool {
 }
 
 // ValidateToolHostingProvidersJSON validates an operator-supplied complete
-// providers map: unique names (by construction), valid kind, a Type valid for
-// that kind, and required fields per Type.
+// providers map: unique names (by construction), a valid Kind, a Type valid
+// for that Kind, and the required fields per Type.
 func ValidateToolHostingProvidersJSON(value string) error {
 	_, err := decodeToolHostingProvidersJSON(value, false)
-	return err
-}
-
-// ValidateToolHostingBindingsJSON validates a complete bindings map: valid
-// kinds and provider names that exist in the current providers.
-func ValidateToolHostingBindingsJSON(value string) error {
-	_, err := decodeToolHostingBindingsJSON(value, false)
 	return err
 }
 
@@ -282,24 +206,15 @@ func validateToolHostingProvider(name string, provider ToolHostingProvider) erro
 	if _, ok := executors[providerType]; !ok {
 		return fmt.Errorf("工具托管提供商 %q 的 type %q 不适用于 kind %q", name, provider.Type, provider.Kind)
 	}
-
-	if providerType == "channel" {
-		if provider.ChannelID <= 0 {
-			return fmt.Errorf("工具托管提供商 %q 引用渠道但未填写 channel_id", name)
-		}
-		if provider.Kind != KindRecognition && strings.TrimSpace(provider.Executor) == "" {
-			return fmt.Errorf("工具托管提供商 %q 引用渠道时需指定 executor（使用的标准执行器）", name)
-		}
-		if executor := strings.ToLower(strings.TrimSpace(provider.Executor)); executor != "" && executor != "channel" {
-			if _, ok := executors[executor]; !ok {
-				return fmt.Errorf("工具托管提供商 %q 的 executor %q 无效", name, provider.Executor)
-			}
-		}
+	if provider.ChannelID < 0 {
+		return fmt.Errorf("工具托管提供商 %q 的 channel_id 无效", name)
+	}
+	if provider.ChannelID > 0 {
+		// channel-backed: credentials come from the channel at execution time
 		return nil
 	}
-
 	if _, keyless := keylessExecutors()[providerType]; !keyless && strings.TrimSpace(provider.APIKey) == "" {
-		return fmt.Errorf("工具托管提供商 %q 缺少 API 密钥", name)
+		return fmt.Errorf("工具托管提供商 %q 缺少 API 密钥（或填写 channel_id 借用渠道凭证）", name)
 	}
 	if providerType == "searxng" && strings.TrimSpace(provider.APIBase) == "" {
 		return fmt.Errorf("工具托管提供商 %q (searxng) 需填写 api_base（实例地址）", name)
@@ -312,61 +227,11 @@ func validateToolHostingProvider(name string, provider ToolHostingProvider) erro
 			return fmt.Errorf("工具托管提供商 %q (http_json) 需填写 extra.result_path", name)
 		}
 	}
-	if strings.EqualFold(provider.Type, "openai") && provider.Kind == KindRecognition && strings.TrimSpace(provider.Model) == "" && provider.ChannelID == 0 {
-		return fmt.Errorf("工具托管提供商 %q (openai 视觉) 需填写模型名", name)
-	}
 	return nil
 }
 
-func decodeToolHostingBindingsJSON(value string, ignoreInvalidEntries bool) (map[string]map[string]string, error) {
-	var bindings map[string]map[string]string
-	if err := common.UnmarshalJsonStr(value, &bindings); err != nil {
-		return nil, fmt.Errorf("解析工具托管绑定失败: %w", err)
-	}
-	if bindings == nil {
-		bindings = make(map[string]map[string]string)
-	}
-	for modelKey, kinds := range bindings {
-		modelKey = strings.TrimSpace(modelKey)
-		if modelKey == "" {
-			if !ignoreInvalidEntries {
-				return nil, fmt.Errorf("工具托管绑定的模型键不能为空")
-			}
-			delete(bindings, modelKey)
-			continue
-		}
-		filtered := make(map[string]string, len(kinds))
-		for kind, providerName := range kinds {
-			if !isValidToolKind(kind) {
-				if !ignoreInvalidEntries {
-					return nil, fmt.Errorf("工具托管绑定 %q 的 kind 无效: %q", modelKey, kind)
-				}
-				continue
-			}
-			providerName = strings.TrimSpace(providerName)
-			if providerName == "" {
-				continue
-			}
-			if _, exists := toolHostingSetting.Providers[providerName]; !exists {
-				if !ignoreInvalidEntries {
-					return nil, fmt.Errorf("工具托管绑定 %q 引用不存在的提供商 %q", modelKey, providerName)
-				}
-				continue
-			}
-			filtered[kind] = providerName
-		}
-		if len(filtered) == 0 {
-			delete(bindings, modelKey)
-			continue
-		}
-		bindings[modelKey] = filtered
-	}
-	return bindings, nil
-}
-
 // LoadToolHostingProvidersFromJSONString replaces the providers and rebuilds
-// the index. Invalid legacy entries are dropped individually, and bindings
-// that referenced a removed provider are pruned to stay consistent.
+// the index. Invalid legacy entries are dropped individually.
 func LoadToolHostingProvidersFromJSONString(value string) {
 	providers, err := decodeToolHostingProvidersJSON(value, true)
 	if err != nil {
@@ -374,52 +239,14 @@ func LoadToolHostingProvidersFromJSONString(value string) {
 		providers = make(map[string]ToolHostingProvider)
 	}
 	toolHostingSetting.Providers = providers
-	pruneBindingsToProviders()
 	RebuildToolHostingIndex()
 }
 
-// LoadToolHostingBindingsFromJSONString replaces the bindings and rebuilds
-// the index. Invalid entries are dropped individually.
-func LoadToolHostingBindingsFromJSONString(value string) {
-	bindings, err := decodeToolHostingBindingsJSON(value, true)
-	if err != nil {
-		common.SysError("加载工具托管绑定失败: " + err.Error())
-		bindings = make(map[string]map[string]string)
-	}
-	toolHostingSetting.Bindings = bindings
-	RebuildToolHostingIndex()
-}
-
-// pruneBindingsToProviders removes binding kinds whose provider no longer
-// exists, keeping the config consistent after a provider removal.
-func pruneBindingsToProviders() {
-	for modelKey, kinds := range toolHostingSetting.Bindings {
-		if len(kinds) == 0 {
-			continue
-		}
-		filtered := make(map[string]string, len(kinds))
-		for kind, providerName := range kinds {
-			if _, exists := toolHostingSetting.Providers[providerName]; exists {
-				filtered[kind] = providerName
-			}
-		}
-		if len(filtered) == 0 {
-			delete(toolHostingSetting.Bindings, modelKey)
-		} else {
-			toolHostingSetting.Bindings[modelKey] = filtered
-		}
-	}
-}
-
-// SetToolHostingForTest seeds providers and bindings for tests.
-func SetToolHostingForTest(providers map[string]ToolHostingProvider, bindings map[string]map[string]string) {
+// SetToolHostingForTest seeds providers for tests.
+func SetToolHostingForTest(providers map[string]ToolHostingProvider) {
 	if providers == nil {
 		providers = make(map[string]ToolHostingProvider)
 	}
-	if bindings == nil {
-		bindings = make(map[string]map[string]string)
-	}
 	toolHostingSetting.Providers = providers
-	toolHostingSetting.Bindings = bindings
 	RebuildToolHostingIndex()
 }

@@ -77,6 +77,10 @@ func executeEmulatedImageGeneration(ctx context.Context, arguments string, backe
 	if backend == nil {
 		return emulatedImageResult{Output: "image generation is not configured on this channel"}
 	}
+	resolved, err := withResolvedChannelCreds(ctx, backend)
+	if err != nil {
+		return emulatedImageResult{Output: "image generation failed: " + err.Error()}
+	}
 	args := parseEmulatedImageArgs(arguments)
 	if args.Prompt == "" {
 		return emulatedImageResult{Output: "image generation failed: prompt is required"}
@@ -84,15 +88,14 @@ func executeEmulatedImageGeneration(ctx context.Context, arguments string, backe
 	var (
 		imageB64 string
 		info     string
-		err      error
 	)
-	switch strings.ToLower(strings.TrimSpace(backend.Provider)) {
+	switch strings.ToLower(strings.TrimSpace(resolved.Provider)) {
 	case dto.EmulatedImageProviderOpenAI:
-		imageB64, info, err = openAIImagesGenerate(ctx, args, backend)
+		imageB64, info, err = openAIImagesGenerate(ctx, args, resolved)
 	case dto.EmulatedImageProviderGemini:
-		imageB64, info, err = geminiImagesGenerate(ctx, args, backend)
+		imageB64, info, err = geminiImagesGenerate(ctx, args, resolved)
 	default:
-		return emulatedImageResult{Output: fmt.Sprintf("unsupported image generation provider %q", backend.Provider)}
+		return emulatedImageResult{Output: fmt.Sprintf("unsupported image generation provider %q", resolved.Provider)}
 	}
 	if err != nil {
 		return emulatedImageResult{Output: fmt.Sprintf("image generation failed: %v", err)}

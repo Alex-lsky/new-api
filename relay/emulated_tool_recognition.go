@@ -77,8 +77,9 @@ func executeEmulatedImageRecognition(ctx context.Context, arguments string, back
 	}
 
 	provider := strings.ToLower(strings.TrimSpace(backend.Provider))
-	executor := strings.ToLower(strings.TrimSpace(backend.Executor))
 	if provider == dto.EmulatedChannelProvider {
+		// legacy provider=="channel" shape: executor decides the call format
+		executor := strings.ToLower(strings.TrimSpace(backend.Executor))
 		apiKey, apiBase, err := resolveEmulatedBackend(ctx, backend)
 		if err != nil {
 			return emulatedRecognitionResult{Output: "image recognition failed: " + err.Error()}
@@ -92,15 +93,15 @@ func executeEmulatedImageRecognition(ctx context.Context, arguments string, back
 		return emulatedRecognitionResult{Output: fmt.Sprintf("image recognition failed: unsupported executor %q", backend.Executor)}
 	}
 
-	apiKey, apiBase, err := resolveEmulatedBackend(ctx, backend)
+	resolved, err := withResolvedChannelCreds(ctx, backend)
 	if err != nil {
 		return emulatedRecognitionResult{Output: "image recognition failed: " + err.Error()}
 	}
 	switch provider {
 	case dto.EmulatedRecognitionProviderGemini:
-		return geminiVisionRecognize(ctx, imageURL, question, apiKey, apiBase, recognitionBackendModel(backend, emulatedRecognitionDefaultModel))
+		return geminiVisionRecognize(ctx, imageURL, question, resolved.APIKey, resolved.APIBase, recognitionBackendModel(resolved, emulatedRecognitionDefaultModel))
 	case dto.EmulatedRecognitionProviderOpenAI:
-		return openaiVisionRecognize(ctx, imageURL, question, apiKey, apiBase, recognitionBackendModel(backend, emulatedRecognitionDefaultOpenAIModel))
+		return openaiVisionRecognize(ctx, imageURL, question, resolved.APIKey, resolved.APIBase, recognitionBackendModel(resolved, emulatedRecognitionDefaultOpenAIModel))
 	default:
 		return emulatedRecognitionResult{Output: fmt.Sprintf("image recognition failed: unsupported provider %q", backend.Provider)}
 	}

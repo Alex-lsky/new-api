@@ -47,36 +47,21 @@ import {
 export const HOSTED_TOOL_WEB_SEARCH = 'web_search'
 export const HOSTED_TOOL_IMAGE_GENERATION = 'image_generation'
 
-export type HostedToolAction = 'none' | 'strip' | 'emulate' | 'exclude'
+export type HostedToolAction = 'none' | 'strip' | 'emulate'
 
 export type HostedToolFormValues = {
   action: HostedToolAction
-  provider: string
-  api_key: string
-  model: string
-  api_base: string
-  http_json_request_body: string
-  http_json_result_path: string
+  provider_ref: string
 }
 
 const hostedToolSchema = z.object({
-  action: z.enum(['none', 'strip', 'emulate', 'exclude']),
-  provider: z.string(),
-  api_key: z.string(),
-  model: z.string(),
-  api_base: z.string(),
-  http_json_request_body: z.string(),
-  http_json_result_path: z.string(),
+  action: z.enum(['none', 'strip', 'emulate']),
+  provider_ref: z.string(),
 })
 
 export const defaultHostedToolValues: HostedToolFormValues = {
   action: 'none',
-  provider: '',
-  api_key: '',
-  model: '',
-  api_base: '',
-  http_json_request_body: '',
-  http_json_result_path: '',
+  provider_ref: '',
 }
 
 function hostedToolTypeAliases(toolType: string): string[] {
@@ -88,38 +73,21 @@ function hostedToolTypeAliases(toolType: string): string[] {
 function hostedToolFromSettings(
   stripList: string[],
   emulateList: string[],
-  excludeList: string[],
-  backend:
-    | {
-        provider?: string
-        api_key?: string
-        model?: string
-        api_base?: string
-        extra?: Record<string, string>
-      }
-    | undefined,
+  backend: { ref?: string } | undefined,
   toolType: string
 ): HostedToolFormValues {
   const aliases = hostedToolTypeAliases(toolType)
   const emulated = aliases.some((alias) => emulateList.includes(alias))
   const stripped = aliases.some((alias) => stripList.includes(alias))
-  const excluded = aliases.some((alias) => excludeList.includes(alias))
   let action: HostedToolAction = 'none'
-  if (excluded) {
-    action = 'exclude'
-  } else if (emulated) {
+  if (emulated) {
     action = 'emulate'
   } else if (stripped) {
     action = 'strip'
   }
   return {
     action,
-    provider: backend?.provider || '',
-    api_key: backend?.api_key || '',
-    model: backend?.model || '',
-    api_base: backend?.api_base || '',
-    http_json_request_body: backend?.extra?.request_body || '',
-    http_json_result_path: backend?.extra?.result_path || '',
+    provider_ref: backend?.ref || '',
   }
 }
 
@@ -286,45 +254,12 @@ function validateHostedToolEmulation(
   fieldName: string
 ): void {
   if (!values || values.action !== 'emulate') return
-  const provider = values.provider.trim()
-  if (!provider) {
+  if (!values.provider_ref.trim()) {
     addRequiredIssue(
       ctx,
-      `${fieldName}.provider`,
-      'Provider is required to emulate a hosted tool'
+      `${fieldName}.provider_ref`,
+      'Select a global tool provider to emulate this tool'
     )
-    return
-  }
-  const keyless = provider === 'searxng' || provider === 'http_json'
-  if (!keyless && !values.api_key.trim()) {
-    addRequiredIssue(
-      ctx,
-      `${fieldName}.api_key`,
-      'API key is required for this provider'
-    )
-  }
-  if (provider === 'searxng' && !values.api_base.trim()) {
-    addRequiredIssue(
-      ctx,
-      `${fieldName}.api_base`,
-      'SearXNG requires your instance URL'
-    )
-  }
-  if (provider === 'http_json') {
-    if (!values.api_base.includes('{query}')) {
-      addRequiredIssue(
-        ctx,
-        `${fieldName}.api_base`,
-        'URL template must contain {query}'
-      )
-    }
-    if (!values.http_json_result_path.trim()) {
-      addRequiredIssue(
-        ctx,
-        `${fieldName}.http_json_result_path`,
-        'Result path is required for http_json'
-      )
-    }
   }
 }
 
@@ -398,8 +333,6 @@ export const channelFormSchema = z
     system_prompt_override: z.boolean().optional(),
     strip_tool_types: z.string().optional(),
     bridge_tool_types: z.string().optional(),
-    // When set, this channel never inherits global tool hosting bindings.
-    disable_global_tool_hosting: z.boolean().optional(),
     hosted_web_search: hostedToolSchema,
     hosted_image_generation: hostedToolSchema,
     // Type-specific settings (stored in settings JSON)
@@ -587,7 +520,6 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   system_prompt_override: false,
   strip_tool_types: '',
   bridge_tool_types: '',
-  disable_global_tool_hosting: false,
   hosted_web_search: { ...defaultHostedToolValues },
   hosted_image_generation: { ...defaultHostedToolValues },
   // Type-specific settings
@@ -632,7 +564,6 @@ export function transformChannelToFormDefaults(
     system_prompt_override: false,
     strip_tool_types: '',
     bridge_tool_types: '',
-    disable_global_tool_hosting: false,
     hosted_web_search: { ...defaultHostedToolValues } as HostedToolFormValues,
     hosted_image_generation: {
       ...defaultHostedToolValues,
@@ -651,9 +582,6 @@ export function transformChannelToFormDefaults(
         : []
       const emulateList: string[] = Array.isArray(parsed.emulate_tool_types)
         ? parsed.emulate_tool_types
-        : []
-      const excludeList: string[] = Array.isArray(parsed.exclude_tool_types)
-        ? parsed.exclude_tool_types
         : []
       const backends = parsed.emulated_tool_backends || {}
       const managedTypes = [
@@ -675,19 +603,15 @@ export function transformChannelToFormDefaults(
         bridge_tool_types: Array.isArray(parsed.bridge_tool_types)
           ? parsed.bridge_tool_types.join(',')
           : '',
-        disable_global_tool_hosting:
-          parsed.disable_global_tool_hosting === true,
         hosted_web_search: hostedToolFromSettings(
           stripList,
           emulateList,
-          excludeList,
           backends.web_search,
           HOSTED_TOOL_WEB_SEARCH
         ),
         hosted_image_generation: hostedToolFromSettings(
           stripList,
           emulateList,
-          excludeList,
           backends.image_generation,
           HOSTED_TOOL_IMAGE_GENERATION
         ),
@@ -836,60 +760,23 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     ),
   ]
   const emulateToolTypes: string[] = []
-  const excludeToolTypes: string[] = []
-  const emulatedToolBackends: Record<
-    string,
-    {
-      provider: string
-      api_key?: string
-      model?: string
-      api_base?: string
-      extra?: Record<string, string>
-    }
-  > = {}
+  const emulatedToolBackends: Record<string, { ref: string }> = {}
   const hostedTools: Array<[string, HostedToolFormValues | undefined]> = [
     [HOSTED_TOOL_WEB_SEARCH, formData.hosted_web_search],
     [HOSTED_TOOL_IMAGE_GENERATION, formData.hosted_image_generation],
   ]
   for (const [toolType, values] of hostedTools) {
-    if (!values || values.action !== 'emulate' || !values.provider.trim()) {
+    if (!values || values.action !== 'emulate' || !values.provider_ref.trim()) {
       if (values?.action === 'strip') {
         stripToolTypes.push(toolType)
-      } else if (values?.action === 'exclude') {
-        excludeToolTypes.push(toolType)
       }
       continue
     }
     emulateToolTypes.push(toolType)
-    const backend: {
-      provider: string
-      api_key?: string
-      model?: string
-      api_base?: string
-      extra?: Record<string, string>
-    } = { provider: values.provider.trim() }
-    if (values.api_key.trim()) backend.api_key = values.api_key.trim()
-    if (values.model.trim()) backend.model = values.model.trim()
-    if (values.api_base.trim()) backend.api_base = values.api_base.trim()
-    if (values.provider === 'http_json') {
-      backend.extra = {}
-      if (values.http_json_request_body.trim()) {
-        backend.extra.request_body = values.http_json_request_body
-      }
-      if (values.http_json_result_path.trim()) {
-        backend.extra.result_path = values.http_json_result_path.trim()
-      }
-    }
-    emulatedToolBackends[toolType] = backend
-  }
-  if (formData.disable_global_tool_hosting === true) {
-    settingObj.disable_global_tool_hosting = true
+    emulatedToolBackends[toolType] = { ref: values.provider_ref.trim() }
   }
   if (stripToolTypes.length > 0) {
     settingObj.strip_tool_types = stripToolTypes
-  }
-  if (excludeToolTypes.length > 0) {
-    settingObj.exclude_tool_types = excludeToolTypes
   }
 
   const bridgeToolTypes = [

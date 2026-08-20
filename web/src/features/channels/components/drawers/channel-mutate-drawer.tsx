@@ -111,6 +111,7 @@ import {
   SecureVerificationDialog,
   useSecureVerification,
 } from '@/features/auth/secure-verification'
+import { useSystemOptions } from '@/features/system-settings/hooks/use-system-options'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { useHiddenClickUnlock } from '@/hooks/use-hidden-click-unlock'
 import {
@@ -184,11 +185,7 @@ import {
 } from '../dialogs/missing-models-confirmation-dialog'
 import { ParamOverrideEditorDialog } from '../dialogs/param-override-editor-dialog'
 import { StatusCodeRiskDialog } from '../dialogs/status-code-risk-dialog'
-import {
-  HostedToolField,
-  IMAGE_PROVIDERS,
-  SEARCH_PROVIDERS,
-} from '../hosted-tool-field'
+import { HostedToolField } from '../hosted-tool-field'
 import { ModelMappingEditor } from '../model-mapping-editor'
 import {
   ChannelAdvancedSection,
@@ -299,7 +296,6 @@ const SENSITIVE_FORM_FIELDS = [
   'system_prompt_override',
   'strip_tool_types',
   'bridge_tool_types',
-  'disable_global_tool_hosting',
   'hosted_web_search',
   'hosted_image_generation',
   'allow_service_tier',
@@ -356,7 +352,6 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.system_prompt_override ||
     values.strip_tool_types?.trim() ||
     values.bridge_tool_types?.trim() ||
-    values.disable_global_tool_hosting === true ||
     values.hosted_web_search?.action !== 'none' ||
     values.hosted_image_generation?.action !== 'none' ||
     (values.http_protocol && values.http_protocol !== 'auto') ||
@@ -769,6 +764,30 @@ export function ChannelMutateDrawer({
   )
   const currentProxy = form.watch('proxy')
   const currentHttpProtocol = form.watch('http_protocol')
+
+  const { data: systemOptions } = useSystemOptions()
+  const globalToolProviders = useMemo(() => {
+    const raw = (
+      systemOptions as unknown as Record<string, string | undefined> | undefined
+    )?.['tool_hosting.providers']
+    let providers: Record<string, { kind?: string }> = {}
+    try {
+      providers = raw ? JSON.parse(raw) : {}
+    } catch {
+      providers = {}
+    }
+    const byKind: Record<string, { name: string }[]> = {
+      web_search: [],
+      image_generation: [],
+      image_recognition: [],
+    }
+    for (const [name, provider] of Object.entries(providers)) {
+      if (provider?.kind) {
+        byKind[provider.kind]?.push({ name })
+      }
+    }
+    return byKind
+  }, [systemOptions])
   const currentHttp2ConnectionShards = form.watch('http2_connection_shards')
   const currentSystemPrompt = form.watch('system_prompt')
   const currentSystemPromptOverride = form.watch('system_prompt_override')
@@ -4336,41 +4355,18 @@ export function ChannelMutateDrawer({
                               }}
                             />
 
-                            <FormField
-                              control={form.control}
-                              name='disable_global_tool_hosting'
-                              render={({ field }) => (
-                                <FormItem>
-                                  <FormLabel>
-                                    {t('Exclude global tool hosting')}
-                                  </FormLabel>
-                                  <FormControl>
-                                    <Switch
-                                      checked={field.value === true}
-                                      onCheckedChange={field.onChange}
-                                    />
-                                  </FormControl>
-                                  <FormDescription>
-                                    {t(
-                                      'When off (default), tool types this channel does not pin inherit the global per-model Tool Hosting bindings. Turn on to keep this channel fully independent.'
-                                    )}
-                                  </FormDescription>
-                                </FormItem>
-                              )}
-                            />
-
                             <HostedToolField
                               control={form.control}
                               name='hosted_web_search'
                               toolLabel={t('Hosted web_search tool')}
-                              providers={SEARCH_PROVIDERS}
+                              providers={globalToolProviders.web_search}
                             />
 
                             <HostedToolField
                               control={form.control}
                               name='hosted_image_generation'
                               toolLabel={t('Hosted image_generation tool')}
-                              providers={IMAGE_PROVIDERS}
+                              providers={globalToolProviders.image_generation}
                             />
 
                             <FormField
