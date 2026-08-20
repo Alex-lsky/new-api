@@ -266,6 +266,43 @@ func emulateResponsesHostedTools(body []byte, emulateSet map[string]struct{}, br
 			return body
 		}
 	}
+	return rewriteEmulatedToolChoice(result, emittedSearch, emittedImage)
+}
+
+func rewriteEmulatedToolChoice(body []byte, searchEmulated bool, imageEmulated bool) []byte {
+	toolChoice := gjson.GetBytes(body, "tool_choice")
+	if !toolChoice.IsObject() {
+		return body
+	}
+
+	toolType := strings.ToLower(strings.TrimSpace(toolChoice.Get("type").String()))
+	functionName := ""
+	switch toolType {
+	case "web_search", "web_search_preview":
+		if !searchEmulated {
+			return body
+		}
+		functionName = emulatedWebSearchFunctionName
+	case "image_generation":
+		if !imageEmulated {
+			return body
+		}
+		functionName = emulatedImageFunctionName
+	default:
+		return body
+	}
+
+	choice, err := common.Marshal(map[string]any{
+		"type": "function",
+		"name": functionName,
+	})
+	if err != nil {
+		return body
+	}
+	result, err := sjson.SetRawBytes(body, "tool_choice", choice)
+	if err != nil {
+		return body
+	}
 	return result
 }
 

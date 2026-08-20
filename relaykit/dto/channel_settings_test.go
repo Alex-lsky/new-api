@@ -792,7 +792,21 @@ func TestChannelSettingsEmulatedRefBackend(t *testing.T) {
 	require.NoError(t, (&ChannelSettings{
 		EmulateToolTypes: []string{"web_search"},
 		EmulatedToolBackends: map[string]EmulatedToolBackend{
-			"web_search": {Provider: "gemini", ChannelID: 6, Model: "gemini-2.5-flash"},
+			"web_search": {Provider: EmulatedSearchProviderZhipuCodePlanSearchMCP, ChannelID: 6},
 		},
-	}).ValidateEmulatedTools(), "channel-backed provider needs no api_key")
+	}).ValidateEmulatedTools(), "MCP executor can borrow only a channel key")
+
+	require.NoError(t, (&ChannelSettings{
+		EmulateToolTypes: []string{"image_recognition"},
+		EmulatedToolBackends: map[string]EmulatedToolBackend{
+			"image_recognition": {Provider: EmulatedRecognitionProviderZhipuCodePlanVisionMCP, ChannelID: 7},
+		},
+	}).ValidateEmulatedTools(), "MCP vision executor can borrow only a channel key")
+
+	require.NoError(t, (&ChannelSettings{
+		EmulateToolTypes: []string{"web_search"},
+		EmulatedToolBackends: map[string]EmulatedToolBackend{
+			"web_search": {Provider: EmulatedSearchProviderGemini, ChannelID: 6},
+		},
+	}).ValidateEmulatedTools(), "relaykit preserves generic channel-backed validation independently of root credential policy")
 }

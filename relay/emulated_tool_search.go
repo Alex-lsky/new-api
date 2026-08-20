@@ -16,10 +16,12 @@ import (
 )
 
 const (
-	emulatedSearchDefaultGeminiModel = "gemini-2.5-flash"
-	emulatedSearchTimeout            = 30 * time.Second
-	emulatedSearchMaxResults         = 8
-	emulatedSearchResponseLimit      = 1 << 20
+	emulatedSearchDefaultGeminiModel         = "gemini-2.5-flash"
+	emulatedSearchDefaultCodePlanMCPEndpoint = "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp"
+	emulatedSearchCodePlanMCPToolName        = "web_search_prime"
+	emulatedSearchTimeout                    = 30 * time.Second
+	emulatedSearchMaxResults                 = 8
+	emulatedSearchResponseLimit              = 1 << 20
 )
 
 // searchResultItem is one normalized web result, shared by every provider so
@@ -55,6 +57,10 @@ func executeEmulatedWebSearch(ctx context.Context, query string, backend *dto.Em
 		results, err = geminiGroundingSearch(ctx, query, resolved)
 	case dto.EmulatedSearchProviderZhipu:
 		results, err = zhipuWebSearch(ctx, query, resolved)
+	case dto.EmulatedSearchProviderZhipuCodePlanSearchMCP:
+		var text string
+		text, err = zhipuCodePlanMCPSearch(ctx, query, resolved)
+		results.Answer = text
 	case dto.EmulatedSearchProviderTavily:
 		results, err = tavilySearch(ctx, query, resolved)
 	case dto.EmulatedSearchProviderBrave:
@@ -210,6 +216,21 @@ func geminiGroundingSearch(ctx context.Context, query string, backend *dto.Emula
 
 // zhipuWebSearch calls the Zhipu (GLM) web search API; Model selects the
 // search engine (search_std by default, search_pro / sogou / baidu ...).
+func zhipuCodePlanMCPSearch(ctx context.Context, query string, backend *dto.EmulatedToolBackend) (string, error) {
+	endpoint := strings.TrimSpace(backend.APIBase)
+	if endpoint == "" {
+		endpoint = emulatedSearchDefaultCodePlanMCPEndpoint
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, emulatedSearchTimeout)
+	defer cancel()
+	return common.CallRemoteMCPTool(requestCtx, endpoint, backend.APIKey, nil, common.MCPToolCall{
+		ToolName: emulatedSearchCodePlanMCPToolName,
+		Arguments: map[string]any{
+			"search_query": query,
+		},
+	})
+}
+
 func zhipuWebSearch(ctx context.Context, query string, backend *dto.EmulatedToolBackend) (searchResults, error) {
 	engine := strings.TrimSpace(backend.Model)
 	if engine == "" {

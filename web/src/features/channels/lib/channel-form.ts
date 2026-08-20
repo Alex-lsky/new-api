@@ -45,6 +45,7 @@ import {
 // UI alias of web_search (they share one executor); strip entries for either
 // are edited through the web_search card.
 export const HOSTED_TOOL_WEB_SEARCH = 'web_search'
+export const HOSTED_TOOL_IMAGE_RECOGNITION = 'image_recognition'
 export const HOSTED_TOOL_IMAGE_GENERATION = 'image_generation'
 
 export type HostedToolAction = 'none' | 'strip' | 'emulate'
@@ -241,7 +242,7 @@ function addRequiredIssue(
 ): void {
   ctx.addIssue({
     code: z.ZodIssueCode.custom,
-    path: [path],
+    path: path.split('.'),
     message,
   })
 }
@@ -334,6 +335,7 @@ export const channelFormSchema = z
     strip_tool_types: z.string().optional(),
     bridge_tool_types: z.string().optional(),
     hosted_web_search: hostedToolSchema,
+    hosted_image_recognition: hostedToolSchema,
     hosted_image_generation: hostedToolSchema,
     // Type-specific settings (stored in settings JSON)
     is_enterprise_account: z.boolean().optional(), // OpenRouter specific
@@ -359,6 +361,11 @@ export const channelFormSchema = z
       ctx,
       data.hosted_web_search,
       'hosted_web_search'
+    )
+    validateHostedToolEmulation(
+      ctx,
+      data.hosted_image_recognition,
+      'hosted_image_recognition'
     )
     validateHostedToolEmulation(
       ctx,
@@ -521,6 +528,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   strip_tool_types: '',
   bridge_tool_types: '',
   hosted_web_search: { ...defaultHostedToolValues },
+  hosted_image_recognition: { ...defaultHostedToolValues },
   hosted_image_generation: { ...defaultHostedToolValues },
   // Type-specific settings
   is_enterprise_account: false,
@@ -565,6 +573,9 @@ export function transformChannelToFormDefaults(
     strip_tool_types: '',
     bridge_tool_types: '',
     hosted_web_search: { ...defaultHostedToolValues } as HostedToolFormValues,
+    hosted_image_recognition: {
+      ...defaultHostedToolValues,
+    } as HostedToolFormValues,
     hosted_image_generation: {
       ...defaultHostedToolValues,
     } as HostedToolFormValues,
@@ -584,10 +595,11 @@ export function transformChannelToFormDefaults(
         ? parsed.emulate_tool_types
         : []
       const backends = parsed.emulated_tool_backends || {}
-      const managedTypes = [
+      const managedTypes = new Set([
         ...hostedToolTypeAliases(HOSTED_TOOL_WEB_SEARCH),
+        HOSTED_TOOL_IMAGE_RECOGNITION,
         HOSTED_TOOL_IMAGE_GENERATION,
-      ]
+      ])
       extraSettings = {
         force_format: parsed.force_format || false,
         thinking_to_content: parsed.thinking_to_content || false,
@@ -598,7 +610,7 @@ export function transformChannelToFormDefaults(
         system_prompt: parsed.system_prompt || '',
         system_prompt_override: parsed.system_prompt_override || false,
         strip_tool_types: stripList
-          .filter((toolType: string) => !managedTypes.includes(toolType))
+          .filter((toolType: string) => !managedTypes.has(toolType))
           .join(','),
         bridge_tool_types: Array.isArray(parsed.bridge_tool_types)
           ? parsed.bridge_tool_types.join(',')
@@ -608,6 +620,12 @@ export function transformChannelToFormDefaults(
           emulateList,
           backends.web_search,
           HOSTED_TOOL_WEB_SEARCH
+        ),
+        hosted_image_recognition: hostedToolFromSettings(
+          stripList,
+          emulateList,
+          backends.image_recognition,
+          HOSTED_TOOL_IMAGE_RECOGNITION
         ),
         hosted_image_generation: hostedToolFromSettings(
           stripList,
@@ -747,22 +765,24 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     settingObj.http2_connection_shards = shards
   }
 
-  const managedTypes = [
+  const managedTypes = new Set([
     ...hostedToolTypeAliases(HOSTED_TOOL_WEB_SEARCH),
+    HOSTED_TOOL_IMAGE_RECOGNITION,
     HOSTED_TOOL_IMAGE_GENERATION,
-  ]
+  ])
   const stripToolTypes = [
     ...new Set(
       String(formData.strip_tool_types || '')
         .split(',')
         .map((toolType) => toolType.trim().toLowerCase())
-        .filter((toolType) => toolType && !managedTypes.includes(toolType))
+        .filter((toolType) => toolType && !managedTypes.has(toolType))
     ),
   ]
   const emulateToolTypes: string[] = []
   const emulatedToolBackends: Record<string, { ref: string }> = {}
   const hostedTools: Array<[string, HostedToolFormValues | undefined]> = [
     [HOSTED_TOOL_WEB_SEARCH, formData.hosted_web_search],
+    [HOSTED_TOOL_IMAGE_RECOGNITION, formData.hosted_image_recognition],
     [HOSTED_TOOL_IMAGE_GENERATION, formData.hosted_image_generation],
   ]
   for (const [toolType, values] of hostedTools) {

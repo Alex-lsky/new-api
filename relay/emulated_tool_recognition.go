@@ -6,21 +6,33 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/tidwall/gjson"
 )
 
 const (
-	emulatedRecognitionDefaultModel       = "gemini-2.5-flash"
-	emulatedRecognitionDefaultOpenAIModel = "gpt-4o-mini"
-	emulatedRecognitionTimeout            = 120 * time.Second
-	emulatedRecognitionQuestionMaxRunes   = 2000
-	emulatedRecognitionImageLimit         = 20 << 20
+	emulatedRecognitionDefaultModel              = "gemini-2.5-flash"
+	emulatedRecognitionDefaultOpenAIModel        = "gpt-4o-mini"
+	emulatedRecognitionDefaultCodePlanMCPCommand = "node"
+	emulatedRecognitionDefaultCodePlanMCPScript  = "/opt/zai-mcp/node_modules/@z_ai/mcp-server/build/index.js"
+	emulatedRecognitionCodePlanMCPCommandEnv     = "ZHIPU_CODE_PLAN_VISION_MCP_COMMAND"
+	emulatedRecognitionCodePlanMCPScriptEnv      = "ZHIPU_CODE_PLAN_VISION_MCP_SCRIPT"
+	emulatedRecognitionCodePlanMCPToolName       = "analyze_image"
+	emulatedRecognitionTimeout                   = 120 * time.Second
+	emulatedRecognitionQuestionMaxRunes          = 2000
+	emulatedRecognitionImageLimit                = 20 << 20
+	emulatedRecognitionMCPConcurrency            = 4
 )
+
+var emulatedRecognitionMCPSlots = make(chan struct{}, emulatedRecognitionMCPConcurrency)
 
 // emulatedRecognitionArgs is the function-call shape the gateway exposes to
 // the model for the injected image_recognition tool.
@@ -102,9 +114,142 @@ func executeEmulatedImageRecognition(ctx context.Context, arguments string, back
 		return geminiVisionRecognize(ctx, imageURL, question, resolved.APIKey, resolved.APIBase, recognitionBackendModel(resolved, emulatedRecognitionDefaultModel))
 	case dto.EmulatedRecognitionProviderOpenAI:
 		return openaiVisionRecognize(ctx, imageURL, question, resolved.APIKey, resolved.APIBase, recognitionBackendModel(resolved, emulatedRecognitionDefaultOpenAIModel))
+	case dto.EmulatedRecognitionProviderZhipuCodePlanVisionMCP:
+		return zhipuCodePlanMCPRecognize(ctx, imageURL, question, resolved.APIKey)
 	default:
 		return emulatedRecognitionResult{Output: fmt.Sprintf("image recognition failed: unsupported provider %q", backend.Provider)}
 	}
+}
+
+func zhipuCodePlanMCPRecognize(ctx context.Context, imageURL string, question string, apiKey string) emulatedRecognitionResult {
+	requestCtx, cancel := context.WithTimeout(ctx, emulatedRecognitionTimeout)
+	defer cancel()
+	select {
+	case emulatedRecognitionMCPSlots <- struct{}{}:
+		defer func() { <-emulatedRecognitionMCPSlots }()
+	case <-requestCtx.Done():
+		return emulatedRecognitionResult{Output: "image recognition failed: " + requestCtx.Err().Error()}
+	}
+	imagePath, cleanup, err := writeMCPVisionImage(requestCtx, imageURL)
+	if err != nil {
+		return emulatedRecognitionResult{Output: "image recognition failed: " + err.Error()}
+	}
+	defer cleanup()
+
+	command := strings.TrimSpace(os.Getenv(emulatedRecognitionCodePlanMCPCommandEnv))
+	if command == "" {
+		command = emulatedRecognitionDefaultCodePlanMCPCommand
+	}
+	script := strings.TrimSpace(os.Getenv(emulatedRecognitionCodePlanMCPScriptEnv))
+	if script == "" {
+		script = emulatedRecognitionDefaultCodePlanMCPScript
+	}
+	text, err := common.CallCommandMCPTool(requestCtx, common.MCPCommand{
+		Name: command,
+		Args: []string{script},
+		Env: []string{
+			"Z_AI_API_KEY=" + apiKey,
+			"Z_AI_MODE=ZHIPU",
+		},
+	}, common.MCPToolCall{
+		ToolName: emulatedRecognitionCodePlanMCPToolName,
+		Arguments: map[string]any{
+			"image_source": imagePath,
+			"prompt":       question,
+		},
+	})
+	if err != nil {
+		return emulatedRecognitionResult{Output: "image recognition failed: " + err.Error()}
+	}
+	text = strings.TrimSpace(text)
+	return emulatedRecognitionResult{Output: text, Summary: truncateTextForSummary(text)}
+}
+
+func writeMCPVisionImage(ctx context.Context, imageURL string) (string, func(), error) {
+	data, mime, err := imageBytesForVision(ctx, imageURL)
+	if err != nil {
+		return "", func() {}, err
+	}
+	extension := ".png"
+	if mime == "image/jpeg" {
+		extension = ".jpg"
+	}
+	file, err := os.CreateTemp("", "new-api-mcp-vision-*"+extension)
+	if err != nil {
+		return "", func() {}, err
+	}
+	path := file.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return filepath.Clean(path), cleanup, nil
+}
+
+func imageBytesForVision(ctx context.Context, imageURL string) ([]byte, string, error) {
+	if data, mime, ok := parseDataURL(imageURL); ok {
+		if base64.StdEncoding.DecodedLen(len(data)) > emulatedRecognitionImageLimit {
+			return nil, "", fmt.Errorf("image exceeds %d byte limit", emulatedRecognitionImageLimit)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(data)
+		if err != nil {
+			return nil, "", fmt.Errorf("decode image data: %w", err)
+		}
+		if len(decoded) > emulatedRecognitionImageLimit {
+			return nil, "", fmt.Errorf("image exceeds %d byte limit", emulatedRecognitionImageLimit)
+		}
+		if sniffed := sniffImageMime(decoded); sniffed != "" {
+			mime = sniffed
+		}
+		if mime != "image/png" && mime != "image/jpeg" {
+			return nil, "", fmt.Errorf("unsupported image format %q", mime)
+		}
+		return decoded, mime, nil
+	}
+	parsedURL, err := url.Parse(imageURL)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
+		return nil, "", fmt.Errorf("image URL must use HTTP(S)")
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, emulatedRecognitionTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, parsedURL.String(), nil)
+	if err != nil {
+		return nil, "", err
+	}
+	response, err := service.GetSSRFProtectedHTTPClient().Do(request)
+	if err != nil {
+		return nil, "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("image download returned %d", response.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, emulatedRecognitionImageLimit+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if len(data) > emulatedRecognitionImageLimit {
+		return nil, "", fmt.Errorf("image exceeds %d byte limit", emulatedRecognitionImageLimit)
+	}
+	mime := strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0])
+	if sniffed := sniffImageMime(data); sniffed != "" {
+		mime = sniffed
+	}
+	if mime != "image/png" && mime != "image/jpeg" {
+		return nil, "", fmt.Errorf("unsupported image format %q", mime)
+	}
+	return data, mime, nil
 }
 
 func recognitionBackendModel(backend *dto.EmulatedToolBackend, def string) string {
@@ -148,7 +293,7 @@ func lastInputImageFromBody(body []byte) string {
 // geminiVisionRecognize calls a Gemini native generateContent endpoint with an
 // inline image and returns the model's text answer.
 func geminiVisionRecognize(ctx context.Context, imageURL string, question string, apiKey string, apiBase string, model string) emulatedRecognitionResult {
-	mime, data, err := imageForVision(imageURL)
+	data, mime, err := imageForVision(imageURL)
 	if err != nil {
 		return emulatedRecognitionResult{Output: "image recognition failed: " + err.Error()}
 	}
@@ -246,37 +391,9 @@ func openaiVisionRecognize(ctx context.Context, imageURL string, question string
 // imageForVision normalizes any image reference (data URL or remote URL) into
 // a mime type + base64 payload for inline Gemini parts.
 func imageForVision(imageURL string) (string, string, error) {
-	if data, mime, ok := parseDataURL(imageURL); ok {
-		if mime == "" {
-			mime = "image/png"
-		}
-		return mime, data, nil
-	}
-	requestCtx, cancel := context.WithTimeout(context.Background(), emulatedRecognitionTimeout)
-	defer cancel()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, imageURL, nil)
+	binary, mime, err := imageBytesForVision(context.Background(), imageURL)
 	if err != nil {
 		return "", "", err
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return "", "", err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("image download returned %d", response.StatusCode)
-	}
-	binary, err := io.ReadAll(io.LimitReader(response.Body, emulatedRecognitionImageLimit))
-	if err != nil {
-		return "", "", err
-	}
-	mime := response.Header.Get("Content-Type")
-	if !strings.HasPrefix(mime, "image/") {
-		if sniffed := sniffImageMime(binary); sniffed != "" {
-			mime = sniffed
-		} else {
-			mime = "image/png"
-		}
 	}
 	return base64.StdEncoding.EncodeToString(binary), mime, nil
 }

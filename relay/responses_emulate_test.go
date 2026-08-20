@@ -56,6 +56,28 @@ func TestEmulateResponsesHostedToolsDeclaration(t *testing.T) {
 	assert.Equal(t, "image_generation", tools[2].Get("type").String())
 }
 
+func TestEmulateResponsesHostedToolsRewritesPinnedChoice(t *testing.T) {
+	tests := []struct {
+		name       string
+		toolType   string
+		emulateSet map[string]struct{}
+		wantName   string
+	}{
+		{name: "web search", toolType: "web_search", emulateSet: map[string]struct{}{"web_search": {}}, wantName: emulatedWebSearchFunctionName},
+		{name: "web search preview", toolType: "web_search_preview", emulateSet: map[string]struct{}{"web_search": {}}, wantName: emulatedWebSearchFunctionName},
+		{name: "image generation", toolType: "image_generation", emulateSet: map[string]struct{}{"image_generation": {}}, wantName: emulatedImageFunctionName},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"model":"m","tools":[{"type":"` + tt.toolType + `"}],"tool_choice":{"type":"` + tt.toolType + `"}}`)
+			out := emulateResponsesHostedTools(body, tt.emulateSet, relaycommon.NewResponsesClientToolBridge())
+			assert.Equal(t, "function", gjson.GetBytes(out, "tool_choice.type").String())
+			assert.Equal(t, tt.wantName, gjson.GetBytes(out, "tool_choice.name").String())
+		})
+	}
+}
+
 func TestEmulateResponsesHostedToolsHistory(t *testing.T) {
 	body := []byte(`{
 		"model": "m",
@@ -74,11 +96,98 @@ func TestEmulateResponsesHostedToolsHistory(t *testing.T) {
 }
 
 func TestEmulateResponsesHostedToolsNoChange(t *testing.T) {
-	body := []byte(`{"model":"m","tools":[{"type":"web_search"}]}`)
+	body := []byte(`{"model":"m","tools":[{"type":"web_search"}],"tool_choice":{"type":"web_search"}}`)
 	assert.Equal(t, string(body), string(emulateResponsesHostedTools(body, nil, relaycommon.NewResponsesClientToolBridge())))
 	assert.Equal(t, string(body), string(emulateResponsesHostedTools(body, map[string]struct{}{"image_generation": {}}, relaycommon.NewResponsesClientToolBridge())))
-	noWebSearch := []byte(`{"model":"m","tools":[{"type":"function","name":"shell"}]}`)
+	noWebSearch := []byte(`{"model":"m","tools":[{"type":"function","name":"shell"}],"tool_choice":{"type":"web_search"}}`)
 	assert.Equal(t, string(noWebSearch), string(emulateResponsesHostedTools(noWebSearch, emulateSet(), relaycommon.NewResponsesClientToolBridge())))
+}
+
+func TestApplyResponsesPassThroughTransformsComposeSequentially(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	testCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	info := &relaycommon.RelayInfo{}
+	backends := map[string]*dto.EmulatedToolBackend{
+		dto.EmulatedToolTypeWebSearch: {Provider: "test"},
+	}
+	body := []byte(`{
+		"model":"m",
+		"input":"search",
+		"tools":[
+			{"type":"computer_use_preview"},
+			{"type":"custom","name":"apply_patch"},
+			{"type":"web_search_preview"}
+		],
+		"tool_choice":{"type":"web_search_preview"}
+	}`)
+
+	out, changed := applyResponsesPassThroughTransforms(
+		testCtx,
+		info,
+		body,
+		map[string]struct{}{"computer_use_preview": {}},
+		map[string]struct{}{"custom": {}},
+		map[string]struct{}{"web_search": {}},
+		backends,
+	)
+
+	require.True(t, changed)
+	tools := gjson.GetBytes(out, "tools").Array()
+	require.Len(t, tools, 2)
+	assert.Equal(t, "apply_patch", tools[0].Get("name").String())
+	assert.Equal(t, "function", tools[0].Get("type").String(), "bridge must run after strip")
+	assert.Equal(t, emulatedWebSearchFunctionName, tools[1].Get("name").String())
+	assert.Equal(t, "function", tools[1].Get("type").String(), "emulation must run after bridge")
+	assert.Equal(t, "function", gjson.GetBytes(out, "tool_choice.type").String())
+	assert.Equal(t, emulatedWebSearchFunctionName, gjson.GetBytes(out, "tool_choice.name").String())
+	require.Equal(t, backends, info.EmulatedTools)
+	require.NotNil(t, info.ClientToolBridge)
+	_, bridged := info.ClientToolBridge.Lookup("apply_patch")
+	assert.True(t, bridged)
+	_, emulated := info.ClientToolBridge.Lookup(emulatedWebSearchFunctionName)
+	assert.True(t, emulated)
+}
+
+func TestApplyResponsesPassThroughTransformsBridgeNameCollisionStillBlocksEmulation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	testCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	info := &relaycommon.RelayInfo{}
+	backends := map[string]*dto.EmulatedToolBackend{
+		dto.EmulatedToolTypeWebSearch: {Provider: "test"},
+	}
+	body := []byte(`{"model":"m","tools":[{"type":"function","name":"web_search"},{"type":"web_search"}],"tool_choice":{"type":"web_search"}}`)
+
+	out, changed := applyResponsesPassThroughTransforms(
+		testCtx,
+		info,
+		body,
+		nil,
+		map[string]struct{}{"custom": {}},
+		map[string]struct{}{"web_search": {}},
+		backends,
+	)
+
+	assert.False(t, changed)
+	assert.Equal(t, body, out)
+	assert.Nil(t, info.EmulatedTools, "a real function with the synthetic name must prevent emulation")
+	require.NotNil(t, info.ClientToolBridge)
+	spec, ok := info.ClientToolBridge.Lookup(emulatedWebSearchFunctionName)
+	require.True(t, ok)
+	assert.Equal(t, relaycommon.ResponsesClientToolFunction, spec.Kind)
+}
+
+func TestApplyResponsesPassThroughTransformsNoOpChannel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	testCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	info := &relaycommon.RelayInfo{}
+	body := []byte(`{"model":"m","input":"hi","tools":[{"type":"web_search"}],"tool_choice":{"type":"web_search"}}`)
+
+	out, changed := applyResponsesPassThroughTransforms(testCtx, info, body, nil, nil, nil, nil)
+
+	assert.False(t, changed)
+	assert.Equal(t, body, out)
+	assert.Nil(t, info.ClientToolBridge)
+	assert.Nil(t, info.EmulatedTools)
 }
 
 func TestEmulatedCallsFromCapturedStream(t *testing.T) {

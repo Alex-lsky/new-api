@@ -297,6 +297,7 @@ const SENSITIVE_FORM_FIELDS = [
   'strip_tool_types',
   'bridge_tool_types',
   'hosted_web_search',
+  'hosted_image_recognition',
   'hosted_image_generation',
   'allow_service_tier',
   'disable_store',
@@ -353,6 +354,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.strip_tool_types?.trim() ||
     values.bridge_tool_types?.trim() ||
     values.hosted_web_search?.action !== 'none' ||
+    values.hosted_image_recognition?.action !== 'none' ||
     values.hosted_image_generation?.action !== 'none' ||
     (values.http_protocol && values.http_protocol !== 'auto') ||
     (values.http2_connection_shards != null &&
@@ -759,6 +761,9 @@ export function ChannelMutateDrawer({
   const currentForceFormat = form.watch('force_format')
   const currentThinkingToContent = form.watch('thinking_to_content')
   const currentPassThroughBodyEnabled = form.watch('pass_through_body_enabled')
+  const currentHostedWebSearch = form.watch('hosted_web_search')
+  const currentHostedImageRecognition = form.watch('hosted_image_recognition')
+  const currentHostedImageGeneration = form.watch('hosted_image_generation')
   const currentDisableTaskPollingSleep = form.watch(
     'disable_task_polling_sleep'
   )
@@ -767,9 +772,9 @@ export function ChannelMutateDrawer({
 
   const { data: systemOptions } = useSystemOptions()
   const globalToolProviders = useMemo(() => {
-    const raw = (
-      systemOptions as unknown as Record<string, string | undefined> | undefined
-    )?.['tool_hosting.providers']
+    const raw = systemOptions?.data?.find(
+      (option) => option.key === 'tool_hosting.providers'
+    )?.value
     let providers: Record<string, { kind?: string }> = {}
     try {
       providers = raw ? JSON.parse(raw) : {}
@@ -1059,6 +1064,9 @@ export function ChannelMutateDrawer({
     currentProxy?.trim() ||
     currentSystemPrompt?.trim() ||
     currentSystemPromptOverride ||
+    currentHostedWebSearch?.action !== 'none' ||
+    currentHostedImageRecognition?.action !== 'none' ||
+    currentHostedImageGeneration?.action !== 'none' ||
     (currentHttpProtocol && currentHttpProtocol !== 'auto') ||
     (currentHttp2ConnectionShards != null && currentHttp2ConnectionShards > 1)
   )
@@ -4364,6 +4372,13 @@ export function ChannelMutateDrawer({
 
                             <HostedToolField
                               control={form.control}
+                              name='hosted_image_recognition'
+                              toolLabel={t('Hosted image_recognition tool')}
+                              providers={globalToolProviders.image_recognition}
+                            />
+
+                            <HostedToolField
+                              control={form.control}
                               name='hosted_image_generation'
                               toolLabel={t('Hosted image_generation tool')}
                               providers={globalToolProviders.image_generation}
@@ -4411,7 +4426,7 @@ export function ChannelMutateDrawer({
                                   </FormControl>
                                   <FormDescription>
                                     {t(
-                                      'Comma-separated extra OpenAI Responses tool types removed from requests before forwarding, for upstreams that reject hosted tools. web_search and image_generation are configured with the hosted tool cards above.'
+                                      'Comma-separated extra OpenAI Responses tool types removed from requests before forwarding, for upstreams that reject hosted tools. web_search, image_recognition, and image_generation are configured with the hosted tool cards above.'
                                     )}
                                   </FormDescription>
                                   <FormMessage />

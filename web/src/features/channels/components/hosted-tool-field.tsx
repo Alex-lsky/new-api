@@ -38,7 +38,10 @@ import {
 
 import type { ChannelFormValues } from '../lib/channel-form'
 
-type HostedToolFieldName = 'hosted_web_search' | 'hosted_image_generation'
+type HostedToolFieldName =
+  | 'hosted_web_search'
+  | 'hosted_image_recognition'
+  | 'hosted_image_generation'
 
 export interface GlobalProviderOption {
   name: string
@@ -77,6 +80,19 @@ export function HostedToolField({
     })),
   ]
 
+  let description = t(
+    'How this channel treats the hosted image_generation tool. Gateway executes runs a provider defined in System Settings → Tool Hosting and restores native image_generation_call items.'
+  )
+  if (name === 'hosted_web_search') {
+    description = t(
+      'How this channel treats the hosted web_search tool. Gateway executes runs a provider defined in System Settings → Tool Hosting and restores native web_search_call items.'
+    )
+  } else if (name === 'hosted_image_recognition') {
+    description = t(
+      'How this channel treats the hosted image_recognition tool. Gateway executes runs a provider defined in System Settings → Tool Hosting and restores native image_recognition_call items.'
+    )
+  }
+
   return (
     <div className='space-y-3 rounded-md border p-3'>
       <FormField
@@ -105,15 +121,7 @@ export function HostedToolField({
                 </SelectGroup>
               </SelectContent>
             </Select>
-            <FormDescription>
-              {name === 'hosted_web_search'
-                ? t(
-                    'How this channel treats the hosted web_search tool. Gateway executes runs a provider defined in System Settings → Tool Hosting and restores native web_search_call items.'
-                  )
-                : t(
-                    'How this channel treats the hosted image_generation tool. Gateway executes runs a provider defined in System Settings → Tool Hosting and restores native image_generation_call items.'
-                  )}
-            </FormDescription>
+            <FormDescription>{description}</FormDescription>
             <FormMessage />
           </FormItem>
         )}

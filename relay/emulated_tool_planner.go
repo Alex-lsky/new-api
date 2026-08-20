@@ -53,10 +53,10 @@ func resolveEmulatedToolRefs(backends map[string]*dto.EmulatedToolBackend) map[s
 	return resolved
 }
 
-// withResolvedChannelCreds returns a copy of the backend whose APIKey/APIBase
-// are filled from the referenced channel when backend.ChannelID is set (the
-// executor type itself stays provider-driven). Reviews of the original backend
-// keep the inline values.
+// withResolvedChannelCreds returns a copy of the backend using credentials from
+// its referenced channel. Code Plan MCP executors borrow only the channel key:
+// remote search owns its MCP endpoint and local vision uses stdio. Existing
+// model-backed executors continue to borrow both key and API base.
 func withResolvedChannelCreds(ctx context.Context, backend *dto.EmulatedToolBackend) (*dto.EmulatedToolBackend, error) {
 	if backend.ChannelID <= 0 {
 		return backend, nil
@@ -65,10 +65,18 @@ func withResolvedChannelCreds(ctx context.Context, backend *dto.EmulatedToolBack
 	if err != nil {
 		return nil, err
 	}
+	return applyChannelCredentials(backend, key, apiBase), nil
+}
+
+func applyChannelCredentials(backend *dto.EmulatedToolBackend, key string, apiBase string) *dto.EmulatedToolBackend {
 	copy := *backend
 	copy.APIKey = key
-	copy.APIBase = apiBase
-	return &copy, nil
+	provider := strings.ToLower(strings.TrimSpace(backend.Provider))
+	if provider != dto.EmulatedSearchProviderZhipuCodePlanSearchMCP &&
+		provider != dto.EmulatedRecognitionProviderZhipuCodePlanVisionMCP {
+		copy.APIBase = apiBase
+	}
+	return &copy
 }
 
 // channelCredentials resolves a channel's key and base_url.

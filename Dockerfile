@@ -27,12 +27,19 @@ COPY . .
 COPY --from=builder /build/web/dist ./web/dist
 RUN go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(cat VERSION)'" -o new-api
 
-FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
+FROM node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget \
     && rm -rf /var/lib/apt/lists/* \
     && update-ca-certificates
+
+WORKDIR /opt/zai-mcp
+COPY zai-mcp-package.json ./package.json
+COPY zai-mcp-package-lock.json ./package-lock.json
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    && node --version \
+    && test -f /opt/zai-mcp/node_modules/@z_ai/mcp-server/build/index.js
 
 COPY --from=builder2 /build/new-api /
 COPY LICENSE NOTICE THIRD-PARTY-LICENSES.md /licenses/

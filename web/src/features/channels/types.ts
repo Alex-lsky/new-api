@@ -91,13 +91,19 @@ export interface ChannelSettings {
   strip_tool_types?: string[]
   bridge_tool_types?: string[]
   emulate_tool_types?: string[]
-  emulated_tool_backends?: Record<string, {
-    provider?: string
-    api_key?: string
-    model?: string
-    api_base?: string
-    extra?: Record<string, string>
-  }>
+  emulated_tool_backends?: Record<
+    string,
+    {
+      ref?: string
+      provider?: string
+      executor?: string
+      channel_id?: number
+      api_key?: string
+      model?: string
+      api_base?: string
+      extra?: Record<string, string>
+    }
+  >
 }
 
 export interface ChannelOtherSettings {

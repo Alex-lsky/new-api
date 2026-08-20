@@ -59,13 +59,14 @@ type ChannelSettings struct {
 // Web search executor providers for EmulatedToolBackend.Provider when the
 // emulated tool type is web_search.
 const (
-	EmulatedSearchProviderGemini   = "gemini"    // Google AI Studio "Grounding with Google Search"
-	EmulatedSearchProviderZhipu    = "zhipu"     // Zhipu (GLM) web_search API; Model selects search_engine
-	EmulatedSearchProviderTavily   = "tavily"    // api.tavily.com
-	EmulatedSearchProviderBrave    = "brave"     // Brave Search API
-	EmulatedSearchProviderBocha    = "bocha"     // Bocha (博查) web search
-	EmulatedSearchProviderSearXNG  = "searxng"   // self-hosted SearXNG, keyless
-	EmulatedSearchProviderHTTPJSON = "http_json" // generic JSON endpoint, api_base template + Extra
+	EmulatedSearchProviderGemini                 = "gemini"                     // Google AI Studio "Grounding with Google Search"
+	EmulatedSearchProviderZhipu                  = "zhipu"                      // Zhipu (GLM) web_search API; Model selects search_engine
+	EmulatedSearchProviderTavily                 = "tavily"                     // api.tavily.com
+	EmulatedSearchProviderBrave                  = "brave"                      // Brave Search API
+	EmulatedSearchProviderBocha                  = "bocha"                      // Bocha (博查) web search
+	EmulatedSearchProviderSearXNG                = "searxng"                    // self-hosted SearXNG, keyless
+	EmulatedSearchProviderHTTPJSON               = "http_json"                  // generic JSON endpoint, api_base template + Extra
+	EmulatedSearchProviderZhipuCodePlanSearchMCP = "zhipu_code_plan_search_mcp" // GLM Code Plan remote MCP search
 )
 
 // Image generation executor providers for EmulatedToolBackend.Provider when
@@ -77,8 +78,9 @@ const (
 
 // Image recognition (vision) executor providers.
 const (
-	EmulatedRecognitionProviderGemini = "gemini" // Gemini generateContent with inline image
-	EmulatedRecognitionProviderOpenAI = "openai" // OpenAI-compatible chat-completions vision
+	EmulatedRecognitionProviderGemini                 = "gemini"                     // Gemini generateContent with inline image
+	EmulatedRecognitionProviderOpenAI                 = "openai"                     // OpenAI-compatible chat-completions vision
+	EmulatedRecognitionProviderZhipuCodePlanVisionMCP = "zhipu_code_plan_vision_mcp" // GLM Code Plan local MCP vision
 )
 
 // EmulatedChannelProvider marks a backend that borrows the credentials of an
@@ -122,13 +124,14 @@ type EmulatedToolBackend struct {
 
 func emulatedSearchProviders() map[string]struct{} {
 	return map[string]struct{}{
-		EmulatedSearchProviderGemini:   {},
-		EmulatedSearchProviderZhipu:    {},
-		EmulatedSearchProviderTavily:   {},
-		EmulatedSearchProviderBrave:    {},
-		EmulatedSearchProviderBocha:    {},
-		EmulatedSearchProviderSearXNG:  {},
-		EmulatedSearchProviderHTTPJSON: {},
+		EmulatedSearchProviderGemini:                 {},
+		EmulatedSearchProviderZhipu:                  {},
+		EmulatedSearchProviderTavily:                 {},
+		EmulatedSearchProviderBrave:                  {},
+		EmulatedSearchProviderBocha:                  {},
+		EmulatedSearchProviderSearXNG:                {},
+		EmulatedSearchProviderHTTPJSON:               {},
+		EmulatedSearchProviderZhipuCodePlanSearchMCP: {},
 	}
 }
 
@@ -141,8 +144,9 @@ func emulatedImageProviders() map[string]struct{} {
 
 func emulatedRecognitionProviders() map[string]struct{} {
 	return map[string]struct{}{
-		EmulatedRecognitionProviderGemini: {},
-		EmulatedRecognitionProviderOpenAI: {},
+		EmulatedRecognitionProviderGemini:                 {},
+		EmulatedRecognitionProviderOpenAI:                 {},
+		EmulatedRecognitionProviderZhipuCodePlanVisionMCP: {},
 	}
 }
 
@@ -363,7 +367,7 @@ func validateEmulatedBackend(toolType string, backend *EmulatedToolBackend) erro
 	switch toolType {
 	case EmulatedToolTypeWebSearch:
 		if _, ok := emulatedSearchProviders()[provider]; !ok {
-			return fmt.Errorf("unknown web search provider %q (supported: gemini, zhipu, tavily, brave, bocha, searxng, http_json, channel)", backend.Provider)
+			return fmt.Errorf("unknown web search provider %q (supported: gemini, zhipu, tavily, brave, bocha, searxng, http_json, zhipu_code_plan_search_mcp, channel)", backend.Provider)
 		}
 	case EmulatedToolTypeImage:
 		if _, ok := emulatedImageProviders()[provider]; !ok {
@@ -371,7 +375,7 @@ func validateEmulatedBackend(toolType string, backend *EmulatedToolBackend) erro
 		}
 	case EmulatedToolTypeRecognition:
 		if _, ok := emulatedRecognitionProviders()[provider]; !ok {
-			return fmt.Errorf("unknown image recognition provider %q (supported: gemini, openai, channel)", backend.Provider)
+			return fmt.Errorf("unknown image recognition provider %q (supported: gemini, openai, zhipu_code_plan_vision_mcp, channel)", backend.Provider)
 		}
 	default:
 		return fmt.Errorf("unsupported emulated tool type %q", toolType)

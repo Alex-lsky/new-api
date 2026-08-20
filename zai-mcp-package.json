@@ -1,0 +1,8 @@
+{
+  "name": "new-api-zai-mcp-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@z_ai/mcp-server": "0.1.4"
+  }
+}

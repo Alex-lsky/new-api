@@ -1,12 +1,14 @@
 package relay
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -95,6 +97,29 @@ func TestExecuteEmulatedWebSearchProviders(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExecuteEmulatedWebSearchCodePlanMCP(t *testing.T) {
+	var gotAuthorization string
+	server := mcp.NewServer(&mcp.Implementation{Name: "search-test", Version: "1"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: emulatedSearchCodePlanMCPToolName}, func(ctx context.Context, request *mcp.CallToolRequest, input map[string]any) (*mcp.CallToolResult, any, error) {
+		assert.Equal(t, "latest Go release", input["search_query"])
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "MCP search result"}}}, nil, nil
+	})
+	handler := mcp.NewStreamableHTTPHandler(func(request *http.Request) *mcp.Server {
+		gotAuthorization = request.Header.Get("Authorization")
+		return server
+	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	result := executeEmulatedWebSearch(t.Context(), "latest Go release", &dto.EmulatedToolBackend{
+		Provider: dto.EmulatedSearchProviderZhipuCodePlanSearchMCP,
+		APIKey:   "code-plan-key",
+		APIBase:  httpServer.URL,
+	})
+	assert.Equal(t, "Bearer code-plan-key", gotAuthorization)
+	assert.Equal(t, "MCP search result", result)
 }
 
 func TestExecuteEmulatedWebSearchHTTPJSONPost(t *testing.T) {

@@ -24,7 +24,12 @@ import (
 // (EmulatedToolBackend.Ref); enabling tool substitution stays at the channel.
 // ---------------------------------------------------------------------------
 
-const ProvidersOptionKey = "tool_hosting.providers"
+const (
+	ProvidersOptionKey = "tool_hosting.providers"
+
+	ExecutorZhipuCodePlanSearchMCP = "zhipu_code_plan_search_mcp"
+	ExecutorZhipuCodePlanVisionMCP = "zhipu_code_plan_vision_mcp"
+)
 
 // Tool kind a hosted-tool provider can execute.
 type ToolKind string
@@ -38,8 +43,9 @@ const (
 // ToolHostingProvider configures one named tool executor.
 type ToolHostingProvider struct {
 	Kind ToolKind `json:"kind"`
-	// Type is the executor: gemini/zhipu/tavily/brave/bocha/searxng/http_json
-	// for web_search; gemini/openai for image_recognition;
+	// Type is the executor: gemini/zhipu/tavily/brave/bocha/searxng/http_json/
+	// zhipu_code_plan_search_mcp for web_search; gemini/openai/
+	// zhipu_code_plan_vision_mcp for image_recognition;
 	// openai_images/gemini_images for image_generation.
 	Type string `json:"type"`
 	// ChannelID optionally borrows this channel's key/base_url as the
@@ -128,27 +134,37 @@ func GetProviders() map[string]ToolHostingProvider {
 // ---------------------------------------------------------------------------
 
 func executorSet(kind ToolKind) map[string]struct{} {
-	base := map[string]struct{}{
-		"gemini": {},
-		"openai": {},
-	}
+	executors := make(map[string]struct{})
+	var supported []string
 	switch kind {
 	case KindWebSearch:
-		for _, executor := range []string{"zhipu", "tavily", "brave", "bocha", "searxng", "http_json", "openai_images", "gemini_images"} {
-			base[executor] = struct{}{}
-		}
+		supported = []string{"gemini", "zhipu", "tavily", "brave", "bocha", "searxng", "http_json", ExecutorZhipuCodePlanSearchMCP}
 	case KindRecognition:
-		// gemini / openai
+		supported = []string{"gemini", "openai", ExecutorZhipuCodePlanVisionMCP}
 	case KindImageGeneration:
-		base["openai_images"] = struct{}{}
-		base["gemini_images"] = struct{}{}
+		supported = []string{"openai_images", "gemini_images"}
 	}
-	return base
+	for _, executor := range supported {
+		executors[executor] = struct{}{}
+	}
+	return executors
 }
 
 // keylessExecutors run without an API key.
 func keylessExecutors() map[string]struct{} {
 	return map[string]struct{}{"searxng": {}, "http_json": {}}
+}
+
+// channelBackedExecutors can borrow a configured model channel's credentials.
+func channelBackedExecutors() map[string]struct{} {
+	return map[string]struct{}{
+		"gemini":                       {},
+		"openai":                       {},
+		"openai_images":                {},
+		"gemini_images":                {},
+		ExecutorZhipuCodePlanSearchMCP: {},
+		ExecutorZhipuCodePlanVisionMCP: {},
+	}
 }
 
 func isValidToolKind(kind string) bool {
@@ -210,7 +226,9 @@ func validateToolHostingProvider(name string, provider ToolHostingProvider) erro
 		return fmt.Errorf("工具托管提供商 %q 的 channel_id 无效", name)
 	}
 	if provider.ChannelID > 0 {
-		// channel-backed: credentials come from the channel at execution time
+		if _, supported := channelBackedExecutors()[providerType]; !supported {
+			return fmt.Errorf("工具托管提供商 %q 的 type %q 不支持借用渠道凭证", name, provider.Type)
+		}
 		return nil
 	}
 	if _, keyless := keylessExecutors()[providerType]; !keyless && strings.TrimSpace(provider.APIKey) == "" {

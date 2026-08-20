@@ -95,52 +95,20 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
-		if stripToolTypes := exemptEmulatedFromStrip(info.ChannelSetting.StripToolTypeSet(), emulateBackends); stripToolTypes != nil {
+		stripToolTypes := exemptEmulatedFromStrip(info.ChannelSetting.StripToolTypeSet(), emulateBackends)
+		if stripToolTypes != nil || bridgeKinds != nil || len(emulateBackends) > 0 {
 			raw, err := storage.Bytes()
 			if err == nil {
-				stripped := stripResponsesToolTypes(raw, stripToolTypes)
-				if !bytes.Equal(stripped, raw) {
-					logger.LogDebug(c, "requestBody after strip_tool_types: %s", stripped)
-					body, closer, err := relaycommon.NewOutboundJSONBody(stripped)
+				transformed, changed := applyResponsesPassThroughTransforms(c, info, raw, stripToolTypes, bridgeKinds, emulateSet, emulateBackends)
+				if info.EmulatedTools != nil {
+					emulatedBaseBody = transformed
+				} else if changed {
+					body, closer, err := relaycommon.NewOutboundJSONBody(transformed)
 					if err != nil {
 						return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 					}
 					defer closer.Close()
 					requestBody = body
-				}
-			}
-		}
-		if bridgeKinds != nil && requestBody == nil {
-			raw, err := storage.Bytes()
-			if err == nil {
-				bridge := relaycommon.NewResponsesClientToolBridge()
-				if bridged := bridgeResponsesClientTools(raw, bridgeKinds, bridge); !bytes.Equal(bridged, raw) {
-					info.ClientToolBridge = bridge
-					logger.LogDebug(c, "requestBody after bridge_tool_types: %s", bridged)
-					body, closer, err := relaycommon.NewOutboundJSONBody(bridged)
-					if err != nil {
-						return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-					}
-					defer closer.Close()
-					requestBody = body
-				}
-			}
-		}
-		// hosted tools the gateway executes itself: rewrite declarations into
-		// functions and remember the backends so the request runs through the
-		// emulation loop instead of a single shot
-		if len(emulateBackends) > 0 && requestBody == nil {
-			raw, err := storage.Bytes()
-			if err == nil {
-				bridge := info.ClientToolBridge
-				if bridge == nil {
-					bridge = relaycommon.NewResponsesClientToolBridge()
-				}
-				if emulated := emulateResponsesHostedTools(raw, emulateSet, bridge); !bytes.Equal(emulated, raw) {
-					logger.LogDebug(c, "requestBody after emulate_tool_types: %s", emulated)
-					info.ClientToolBridge = bridge
-					info.EmulatedTools = emulateBackends
-					emulatedBaseBody = emulated
 				}
 			}
 		}
@@ -297,6 +265,48 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		service.PostTextConsumeQuota(c, info, usageDto, nil)
 	}
 	return nil
+}
+
+func applyResponsesPassThroughTransforms(c *gin.Context, info *relaycommon.RelayInfo, body []byte, stripToolTypes map[string]struct{}, bridgeKinds map[string]struct{}, emulateSet map[string]struct{}, emulateBackends map[string]*dto.EmulatedToolBackend) ([]byte, bool) {
+	result := body
+	changed := false
+
+	if stripToolTypes != nil {
+		if stripped := stripResponsesToolTypes(result, stripToolTypes); !bytes.Equal(stripped, result) {
+			result = stripped
+			changed = true
+			logger.LogDebug(c, "requestBody after strip_tool_types: %s", result)
+		}
+	}
+
+	if bridgeKinds != nil {
+		bridge := relaycommon.NewResponsesClientToolBridge()
+		bridged := bridgeResponsesClientTools(result, bridgeKinds, bridge)
+		if bridge.Len() > 0 {
+			info.ClientToolBridge = bridge
+		}
+		if !bytes.Equal(bridged, result) {
+			result = bridged
+			changed = true
+			logger.LogDebug(c, "requestBody after bridge_tool_types: %s", result)
+		}
+	}
+
+	if len(emulateBackends) > 0 {
+		bridge := info.ClientToolBridge
+		if bridge == nil {
+			bridge = relaycommon.NewResponsesClientToolBridge()
+		}
+		if emulated := emulateResponsesHostedTools(result, emulateSet, bridge); !bytes.Equal(emulated, result) {
+			result = emulated
+			changed = true
+			info.ClientToolBridge = bridge
+			info.EmulatedTools = emulateBackends
+			logger.LogDebug(c, "requestBody after emulate_tool_types: %s", result)
+		}
+	}
+
+	return result, changed
 }
 
 func normalizeResponsesTools(raw json.RawMessage) json.RawMessage {
