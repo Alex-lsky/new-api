@@ -19,8 +19,11 @@ import (
 )
 
 // maxEmulationRounds bounds how many times the gateway may go back to the
-// upstream with search results before forcing a final answer.
-const maxEmulationRounds = 3
+// upstream with search results. It is sized with generous headroom so a model
+// that refines its query across several searches still gets a final round to
+// produce an answer; the loop terminates early the moment upstream returns no
+// search calls.
+const maxEmulationRounds = 8
 
 const emulatedWebSearchFunctionName = "web_search"
 
