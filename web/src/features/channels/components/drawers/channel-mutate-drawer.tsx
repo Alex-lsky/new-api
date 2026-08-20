@@ -293,6 +293,7 @@ const SENSITIVE_FORM_FIELDS = [
   'system_prompt',
   'system_prompt_override',
   'strip_tool_types',
+  'bridge_tool_types',
   'allow_service_tier',
   'disable_store',
   'allow_safety_identifier',
@@ -346,6 +347,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.pass_through_body_enabled ||
     values.system_prompt_override ||
     values.strip_tool_types?.trim() ||
+    values.bridge_tool_types?.trim() ||
     (values.http_protocol && values.http_protocol !== 'auto') ||
     (values.http2_connection_shards != null &&
       values.http2_connection_shards > 1) ||
@@ -4321,6 +4323,32 @@ export function ChannelMutateDrawer({
                                   </FormItem>
                                 )
                               }}
+                            />
+
+                            <FormField
+                              control={form.control}
+                              name='bridge_tool_types'
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>
+                                    {t('Bridge Tool Types')}
+                                  </FormLabel>
+                                  <FormControl>
+                                    <Input
+                                      placeholder={t(
+                                        'e.g. custom, namespace, tool_search'
+                                      )}
+                                      {...field}
+                                    />
+                                  </FormControl>
+                                  <FormDescription>
+                                    {t(
+                                      'Comma-separated OpenAI Responses tool types rewritten into ordinary function tools for function-only upstreams, and restored to native kinds on the way back. Enables client-executed tools (Codex apply_patch, MCP) on upstreams that reject them.'
+                                    )}
+                                  </FormDescription>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
                             />
 
                             <FormField

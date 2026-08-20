@@ -173,6 +173,12 @@ type RelayInfo struct {
 
 	StreamStatus *StreamStatus
 
+	// ClientToolBridge records the function-name → native-tool-kind mapping
+	// while a Responses request is bridged for a function-only upstream (see
+	// ChannelSettings.BridgeToolTypes). The response side uses it to restore
+	// custom/namespace/tool_search call items. Nil when nothing was bridged.
+	ClientToolBridge *ResponsesClientToolBridge
+
 	// convOptions caches the converter settings snapshot (see ConvOptions).
 	convOptions *convmeta.Options
 
@@ -234,6 +240,9 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 	// Channel identity feeds the converter options snapshot (e.g.
 	// OpenRouterDialect); drop the cache so a cross-channel retry rebuilds it.
 	info.convOptions = nil
+	// A retry on a different channel must not restore tools bridged for the
+	// previous channel; the request build re-populates it when bridging applies.
+	info.ClientToolBridge = nil
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || channelMeta.ChannelSetting.PassThroughBodyEnabled {
 		info.ReasoningEffort = ""
 	} else {

@@ -30,16 +30,41 @@ type ChannelSettings struct {
 	// so clients like Codex that always declare them keep working. Tool-choice
 	// references and include entries tied to a stripped tool are dropped too.
 	StripToolTypes []string `json:"strip_tool_types,omitempty"`
+	// BridgeToolTypes lists OpenAI Responses tool types (e.g. "custom",
+	// "namespace", "tool_search") that are rewritten into ordinary function
+	// tools before the request reaches this channel, and restored to their
+	// native kinds on the way back. Upstreams that only accept function tools
+	// (e.g. opencode zen/go) thereby keep working with clients that rely on
+	// client-executed tool kinds, such as Codex's apply_patch and MCP tools.
+	// The tools in question are executed by the client, so no execution
+	// capability is needed on the gateway.
+	BridgeToolTypes []string `json:"bridge_tool_types,omitempty"`
 }
 
 // StripToolTypeSet returns the normalized strip_tool_types blacklist as a set.
 // Nil means no stripping is configured.
 func (s *ChannelSettings) StripToolTypeSet() map[string]struct{} {
-	if s == nil || len(s.StripToolTypes) == 0 {
+	if s == nil {
 		return nil
 	}
-	set := make(map[string]struct{}, len(s.StripToolTypes))
-	for _, toolType := range s.StripToolTypes {
+	return normalizeToolTypeSet(s.StripToolTypes)
+}
+
+// BridgeToolTypeSet returns the normalized bridge_tool_types set.
+// Nil means no bridging is configured.
+func (s *ChannelSettings) BridgeToolTypeSet() map[string]struct{} {
+	if s == nil {
+		return nil
+	}
+	return normalizeToolTypeSet(s.BridgeToolTypes)
+}
+
+func normalizeToolTypeSet(toolTypes []string) map[string]struct{} {
+	if len(toolTypes) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(toolTypes))
+	for _, toolType := range toolTypes {
 		toolType = strings.ToLower(strings.TrimSpace(toolType))
 		if toolType == "" {
 			continue

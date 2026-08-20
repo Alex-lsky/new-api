@@ -83,6 +83,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	}
 	adaptor.Init(info)
 	var requestBody io.Reader
+	bridgeKinds := info.ChannelSetting.BridgeToolTypeSet()
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
@@ -95,6 +96,22 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 				if !bytes.Equal(stripped, raw) {
 					logger.LogDebug(c, "requestBody after strip_tool_types: %s", stripped)
 					body, closer, err := relaycommon.NewOutboundJSONBody(stripped)
+					if err != nil {
+						return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+					}
+					defer closer.Close()
+					requestBody = body
+				}
+			}
+		}
+		if bridgeKinds != nil && requestBody == nil {
+			raw, err := storage.Bytes()
+			if err == nil {
+				bridge := relaycommon.NewResponsesClientToolBridge()
+				if bridged := bridgeResponsesClientTools(raw, bridgeKinds, bridge); !bytes.Equal(bridged, raw) {
+					info.ClientToolBridge = bridge
+					logger.LogDebug(c, "requestBody after bridge_tool_types: %s", bridged)
+					body, closer, err := relaycommon.NewOutboundJSONBody(bridged)
 					if err != nil {
 						return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 					}
@@ -135,6 +152,19 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		// a tool the upstream rejects
 		if stripToolTypes := info.ChannelSetting.StripToolTypeSet(); stripToolTypes != nil {
 			jsonData = stripResponsesToolTypes(jsonData, stripToolTypes)
+		}
+
+		// bridge client-executed tool kinds (custom/namespace/tool_search) into
+		// function tools for function-only upstreams, recording the mapping for
+		// the response-side restore
+		if bridgeKinds != nil {
+			bridge := relaycommon.NewResponsesClientToolBridge()
+			if bridged := bridgeResponsesClientTools(jsonData, bridgeKinds, bridge); !bytes.Equal(bridged, jsonData) {
+				jsonData = bridged
+				if bridge.Len() > 0 {
+					info.ClientToolBridge = bridge
+				}
+			}
 		}
 
 		logger.LogDebug(c, "requestBody: %s", jsonData)

@@ -35,6 +35,12 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
+	// Function-only upstreams (bridge_tool_types) spoke function tools; restore
+	// the native custom/namespace/tool_search call kinds the client declared.
+	if info.ClientToolBridge != nil {
+		responseBody = restoreBridgedResponsesOutput(responseBody, info.ClientToolBridge)
+	}
+
 	// OpenCode zen/go strips the reasoning item from DeepSeek thinking-mode
 	// responses. Codex then cannot pass reasoning_content back on the next
 	// turn, which DeepSeek requires in thinking mode. Inject an empty
@@ -117,6 +123,13 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		if b, err := common.Marshal(payload); err == nil {
 			_ = helper.ResponseChunkData(c, dto.ResponsesStreamResponse{}, string(b))
 		}
+	}
+
+	// Restore bridged client tool kinds (custom/namespace/tool_search) on the
+	// fly when the request bridged them for this function-only upstream.
+	var streamBridge *responsesStreamToolBridge
+	if info.ClientToolBridge != nil {
+		streamBridge = newResponsesStreamToolBridge(info.ClientToolBridge)
 	}
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
@@ -276,7 +289,21 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				evtItemDone = true
 			}
 		}
-		sendResponsesStreamData(c, streamResponse, data)
+		outData := data
+		if streamBridge != nil {
+			transformed, preEvents, forward := streamBridge.transformEvent([]byte(data))
+			for _, pre := range preEvents {
+				var preResponse dto.ResponsesStreamResponse
+				if err := common.UnmarshalJsonStr(string(pre), &preResponse); err == nil {
+					_ = helper.ResponseChunkData(c, preResponse, string(pre))
+				}
+			}
+			if !forward {
+				return
+			}
+			outData = string(transformed)
+		}
+		sendResponsesStreamData(c, streamResponse, outData)
 		switch streamResponse.Type {
 		case "response.completed", "response.done":
 			if streamResponse.Response != nil {

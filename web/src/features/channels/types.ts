@@ -89,6 +89,7 @@ export interface ChannelSettings {
   http_protocol?: 'auto' | 'http1' | string
   http2_connection_shards?: number
   strip_tool_types?: string[]
+  bridge_tool_types?: string[]
 }
 
 export interface ChannelOtherSettings {
