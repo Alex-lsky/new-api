@@ -31,6 +31,11 @@ const (
 	// function, the gateway runs the configured image backend, and the final
 	// response restores native image_generation_call items carrying the image.
 	ResponsesClientToolImageGeneration ResponsesClientToolKind = "image_generation"
+	// ResponsesClientToolImageRecognition marks a gateway-injected
+	// image_recognition function tool: the model calls it to analyze an image,
+	// the gateway sends the image to the configured vision backend, and the
+	// final response restores a synthetic image_recognition_call item.
+	ResponsesClientToolImageRecognition ResponsesClientToolKind = "image_recognition"
 )
 
 // ResponsesClientToolSpec records how a function tool seen by the upstream maps

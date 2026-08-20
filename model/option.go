@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/performance_setting"
 	"github.com/QuantumNous/new-api/setting/price_alias"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/QuantumNous/new-api/setting/tool_hosting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"gorm.io/gorm"
 )
@@ -210,6 +211,12 @@ func SyncOptions(frequency int) {
 func validateOptionValue(key string, value string) error {
 	if key == operation_setting.ToolPriceOptionKey {
 		return operation_setting.ValidateToolPricesJSON(value)
+	}
+	if key == tool_hosting.ProvidersOptionKey {
+		return tool_hosting.ValidateToolHostingProvidersJSON(value)
+	}
+	if key == tool_hosting.BindingsOptionKey {
+		return tool_hosting.ValidateToolHostingBindingsJSON(value)
 	}
 	if key == operation_setting.ChannelTestConcurrencyOptionKey {
 		return operation_setting.ValidateChannelTestConcurrency(value)
@@ -617,6 +624,14 @@ func updateOptionMap(key string, value string) (err error) {
 func handleConfigUpdate(key, value string) bool {
 	if key == operation_setting.ToolPriceOptionKey {
 		operation_setting.LoadToolPricesFromJSONString(value)
+		return true
+	}
+	if key == tool_hosting.ProvidersOptionKey {
+		tool_hosting.LoadToolHostingProvidersFromJSONString(value)
+		return true
+	}
+	if key == tool_hosting.BindingsOptionKey {
+		tool_hosting.LoadToolHostingBindingsFromJSONString(value)
 		return true
 	}
 

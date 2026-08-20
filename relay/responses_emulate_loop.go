@@ -26,12 +26,13 @@ import (
 const maxEmulationRounds = 8
 
 const (
-	emulatedWebSearchFunctionName = "web_search"
-	emulatedImageFunctionName     = "image_generation"
+	emulatedWebSearchFunctionName   = "web_search"
+	emulatedImageFunctionName       = "image_generation"
+	emulatedRecognitionFunctionName = "image_recognition"
 )
 
 // emulatedToolCall is one call the model made against an emulated hosted
-// tool. Result/ImageB64 are filled in when the gateway executes the call.
+// tool. Result/ImageB64/Summary are filled in when the gateway executes it.
 type emulatedToolCall struct {
 	CallID    string
 	Name      string
@@ -43,6 +44,24 @@ type emulatedToolCall struct {
 	// client in a native image_generation_call item. Only set for
 	// image_generation calls.
 	ImageB64 string
+	// Summary is the short text restored in an image_recognition_call item.
+	// Only set for image_recognition calls.
+	Summary string
+}
+
+func emulatedRecognitionToolDeclaration() map[string]any {
+	return map[string]any{
+		"type":        "function",
+		"name":        emulatedRecognitionFunctionName,
+		"description": "Analyze an image (the image the user already attached, or the one in image_url) and answer a question about it.",
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"image_url": map[string]any{"type": "string", "description": "Optional image to analyze; omit to analyze the last image in the conversation."},
+				"question":  map[string]any{"type": "string", "description": "What to determine about the image."},
+			},
+		},
+	}
 }
 
 // exemptEmulatedFromStrip removes tool types the gateway emulates from the
@@ -81,13 +100,15 @@ func emulateResponsesHostedTools(body []byte, emulateSet map[string]struct{}, br
 	}
 	tools := gjson.GetBytes(body, "tools")
 	rewrittenInput, inputChanged := rewriteEmulatedToolHistory(gjson.GetBytes(body, "input"), emulateSet)
-	if !tools.IsArray() && !inputChanged {
+	_, recognitionEmulated := emulateSet["image_recognition"]
+	if !tools.IsArray() && !inputChanged && !recognitionEmulated {
 		return body
 	}
 
 	changed := inputChanged
 	emittedSearch := false
 	emittedImage := false
+	emittedRecognition := false
 	newTools := make([][]byte, 0, len(tools.Array()))
 	for _, tool := range tools.Array() {
 		toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
@@ -169,15 +190,51 @@ func emulateResponsesHostedTools(body []byte, emulateSet map[string]struct{}, br
 			emittedImage = true
 			changed = true
 			continue
+		case "image_recognition":
+			if _, emulated := emulateSet[toolType]; !emulated {
+				newTools = append(newTools, []byte(tool.Raw))
+				continue
+			}
+			if emittedRecognition {
+				changed = true
+				continue
+			}
+			replacement := marshaledTool(emulatedRecognitionToolDeclaration())
+			if replacement == nil || !bridge.Register(emulatedRecognitionFunctionName, relaycommon.ResponsesClientToolSpec{
+				Kind: relaycommon.ResponsesClientToolImageRecognition,
+				Name: emulatedRecognitionFunctionName,
+			}) {
+				newTools = append(newTools, []byte(tool.Raw))
+				continue
+			}
+			newTools = append(newTools, replacement)
+			emittedRecognition = true
+			changed = true
+			continue
 		}
 		newTools = append(newTools, []byte(tool.Raw))
+	}
+
+	// the gateway-injected image_recognition tool: add the declaration even
+	// when the client never listed it, so text-only upstreams can still call
+	// a vision backend
+	if recognitionEmulated && !emittedRecognition {
+		replacement := marshaledTool(emulatedRecognitionToolDeclaration())
+		if replacement != nil && bridge.Register(emulatedRecognitionFunctionName, relaycommon.ResponsesClientToolSpec{
+			Kind: relaycommon.ResponsesClientToolImageRecognition,
+			Name: emulatedRecognitionFunctionName,
+		}) {
+			newTools = append(newTools, replacement)
+			emittedRecognition = true
+			changed = true
+		}
 	}
 
 	if !changed {
 		return body
 	}
 	result := body
-	if tools.IsArray() {
+	{
 		var b strings.Builder
 		b.WriteByte('[')
 		for i, raw := range newTools {
@@ -226,6 +283,7 @@ func rewriteEmulatedToolHistory(input gjson.Result, emulateSet map[string]struct
 	changed := false
 	_, searchEmulated := emulateSet["web_search"]
 	_, imageEmulated := emulateSet["image_generation"]
+	_, recognitionEmulated := emulateSet["image_recognition"]
 	for _, item := range items {
 		switch strings.ToLower(strings.TrimSpace(item.Get("type").String())) {
 		case "web_search_call":
@@ -274,10 +332,50 @@ func rewriteEmulatedToolHistory(input gjson.Result, emulateSet map[string]struct
 				changed = true
 				continue
 			}
+		case "image_recognition_call":
+			if !recognitionEmulated {
+				break
+			}
+			callID := item.Get("call_id").String()
+			if callID == "" {
+				callID = item.Get("id").String()
+			}
+			args := recognitionArgsFromHistoryItem(item)
+			arguments, _ := common.Marshal(args)
+			if replacement := marshaledTool(map[string]any{
+				"type":      "function_call",
+				"call_id":   callID,
+				"name":      emulatedRecognitionFunctionName,
+				"arguments": string(arguments),
+			}); replacement != nil {
+				rewritten = append(rewritten, replacement)
+				if output := marshaledTool(map[string]any{
+					"type":    "function_call_output",
+					"call_id": callID,
+					"output":  "image analyzed and the result already surfaced to the user",
+				}); output != nil {
+					rewritten = append(rewritten, output)
+				}
+				changed = true
+				continue
+			}
 		}
 		rewritten = append(rewritten, []byte(item.Raw))
 	}
 	return rewritten, changed
+}
+
+// recognitionArgsFromHistoryItem best-effort extracts the arguments of a
+// client-echoed image_recognition_call item.
+func recognitionArgsFromHistoryItem(item gjson.Result) map[string]any {
+	args := map[string]any{}
+	if imageURL := firstGjsonString(item, "image_url", "action.image_url"); imageURL != "" {
+		args["image_url"] = imageURL
+	}
+	if question := firstGjsonString(item, "question", "action.question"); question != "" {
+		args["question"] = question
+	}
+	return args
 }
 
 // imageArgsFromHistoryItem best-effort extracts the generation arguments of
@@ -393,6 +491,11 @@ func appendEmulatedToolResults(body []byte, calls []emulatedToolCall, captured [
 			call.Result = result.Output
 			call.ImageB64 = result.ImageB64
 			logger.LogDebug(c, "emulated image_generation %q -> %.200s", emulatedImagePrompt(call.Arguments), result.Output)
+		case relaycommon.ResponsesClientToolImageRecognition:
+			result := executeEmulatedImageRecognition(c.Request.Context(), call.Arguments, backends[dto.EmulatedToolTypeRecognition], body)
+			call.Result = result.Output
+			call.Summary = result.Summary
+			logger.LogDebug(c, "emulated image_recognition %s -> %.200s", call.Arguments, result.Output)
 		default:
 			call.Result = executeEmulatedWebSearch(c.Request.Context(), webSearchQuery(call.Arguments), backends[dto.EmulatedToolTypeWebSearch])
 			logger.LogDebug(c, "emulated web_search %q -> %.200s", webSearchQuery(call.Arguments), call.Result)
@@ -472,7 +575,7 @@ func emulatedCallsFromCaptured(captured []byte, info *relaycommon.RelayInfo) []e
 		case "function_call":
 			name := strings.TrimSpace(item.Get("name").String())
 			spec, ok := info.ClientToolBridge.Lookup(name)
-			if !ok || (spec.Kind != relaycommon.ResponsesClientToolWebSearch && spec.Kind != relaycommon.ResponsesClientToolImageGeneration) {
+			if !ok || (spec.Kind != relaycommon.ResponsesClientToolWebSearch && spec.Kind != relaycommon.ResponsesClientToolImageGeneration && spec.Kind != relaycommon.ResponsesClientToolImageRecognition) {
 				return
 			}
 			call = emulatedToolCall{
@@ -496,6 +599,13 @@ func emulatedCallsFromCaptured(captured []byte, info *relaycommon.RelayInfo) []e
 				Arguments: string(imageHistoryArguments(item)),
 				Kind:      relaycommon.ResponsesClientToolImageGeneration,
 			}
+		case "image_recognition_call":
+			call = emulatedToolCall{
+				CallID:    strings.TrimSpace(item.Get("call_id").String()),
+				Name:      emulatedRecognitionFunctionName,
+				Arguments: string(recognitionHistoryArguments(item)),
+				Kind:      relaycommon.ResponsesClientToolImageRecognition,
+			}
 		default:
 			return
 		}
@@ -517,6 +627,13 @@ func emulatedCallsFromCaptured(captured []byte, info *relaycommon.RelayInfo) []e
 // JSON suitable for the function form.
 func imageHistoryArguments(item gjson.Result) []byte {
 	arguments, _ := common.Marshal(imageArgsFromHistoryItem(item))
+	return arguments
+}
+
+// recognitionHistoryArguments renders an image_recognition call item's
+// arguments as JSON suitable for the function form.
+func recognitionHistoryArguments(item gjson.Result) []byte {
+	arguments, _ := common.Marshal(recognitionArgsFromHistoryItem(item))
 	return arguments
 }
 
@@ -644,6 +761,22 @@ func restoredToolItem(call emulatedToolCall) map[string]any {
 		}
 		return item
 	}
+	if call.Kind == relaycommon.ResponsesClientToolImageRecognition {
+		args := parseEmulatedRecognitionArgs(call.Arguments)
+		item := map[string]any{
+			"id":      callIDOrDefault(call),
+			"call_id": call.CallID,
+			"type":    "image_recognition_call",
+			"status":  "completed",
+			"action":  map[string]any{"type": "recognize", "question": args.Question},
+		}
+		if call.Summary != "" {
+			item["summary"] = call.Summary
+		} else if strings.Contains(call.Result, "failed") || strings.Contains(call.Result, "not configured") {
+			item["status"] = "failed"
+		}
+		return item
+	}
 	return map[string]any{
 		"id":      callIDOrDefault(call),
 		"call_id": call.CallID,
@@ -742,10 +875,14 @@ func callIDOrDefault(call emulatedToolCall) string {
 	if call.CallID != "" {
 		return call.CallID
 	}
-	if call.Kind == relaycommon.ResponsesClientToolImageGeneration {
+	switch call.Kind {
+	case relaycommon.ResponsesClientToolImageGeneration:
 		return "ig_" + common.GetUUID()
+	case relaycommon.ResponsesClientToolImageRecognition:
+		return "ir_" + common.GetUUID()
+	default:
+		return "ws_" + common.GetUUID()
 	}
-	return "ws_" + common.GetUUID()
 }
 
 func sseFrameEvent(frame []byte) string {

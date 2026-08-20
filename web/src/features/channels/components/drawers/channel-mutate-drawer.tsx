@@ -299,6 +299,7 @@ const SENSITIVE_FORM_FIELDS = [
   'system_prompt_override',
   'strip_tool_types',
   'bridge_tool_types',
+  'disable_global_tool_hosting',
   'hosted_web_search',
   'hosted_image_generation',
   'allow_service_tier',
@@ -355,6 +356,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.system_prompt_override ||
     values.strip_tool_types?.trim() ||
     values.bridge_tool_types?.trim() ||
+    values.disable_global_tool_hosting === true ||
     values.hosted_web_search?.action !== 'none' ||
     values.hosted_image_generation?.action !== 'none' ||
     (values.http_protocol && values.http_protocol !== 'auto') ||
@@ -4332,6 +4334,29 @@ export function ChannelMutateDrawer({
                                   </FormItem>
                                 )
                               }}
+                            />
+
+                            <FormField
+                              control={form.control}
+                              name='disable_global_tool_hosting'
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>
+                                    {t('Exclude global tool hosting')}
+                                  </FormLabel>
+                                  <FormControl>
+                                    <Switch
+                                      checked={field.value === true}
+                                      onCheckedChange={field.onChange}
+                                    />
+                                  </FormControl>
+                                  <FormDescription>
+                                    {t(
+                                      'When off (default), tool types this channel does not pin inherit the global per-model Tool Hosting bindings. Turn on to keep this channel fully independent.'
+                                    )}
+                                  </FormDescription>
+                                </FormItem>
+                              )}
                             />
 
                             <HostedToolField

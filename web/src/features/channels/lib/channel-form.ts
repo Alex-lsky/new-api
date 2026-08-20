@@ -47,7 +47,7 @@ import {
 export const HOSTED_TOOL_WEB_SEARCH = 'web_search'
 export const HOSTED_TOOL_IMAGE_GENERATION = 'image_generation'
 
-export type HostedToolAction = 'none' | 'strip' | 'emulate'
+export type HostedToolAction = 'none' | 'strip' | 'emulate' | 'exclude'
 
 export type HostedToolFormValues = {
   action: HostedToolAction
@@ -60,7 +60,7 @@ export type HostedToolFormValues = {
 }
 
 const hostedToolSchema = z.object({
-  action: z.enum(['none', 'strip', 'emulate']),
+  action: z.enum(['none', 'strip', 'emulate', 'exclude']),
   provider: z.string(),
   api_key: z.string(),
   model: z.string(),
@@ -88,6 +88,7 @@ function hostedToolTypeAliases(toolType: string): string[] {
 function hostedToolFromSettings(
   stripList: string[],
   emulateList: string[],
+  excludeList: string[],
   backend:
     | {
         provider?: string
@@ -102,8 +103,11 @@ function hostedToolFromSettings(
   const aliases = hostedToolTypeAliases(toolType)
   const emulated = aliases.some((alias) => emulateList.includes(alias))
   const stripped = aliases.some((alias) => stripList.includes(alias))
+  const excluded = aliases.some((alias) => excludeList.includes(alias))
   let action: HostedToolAction = 'none'
-  if (emulated) {
+  if (excluded) {
+    action = 'exclude'
+  } else if (emulated) {
     action = 'emulate'
   } else if (stripped) {
     action = 'strip'
@@ -394,6 +398,8 @@ export const channelFormSchema = z
     system_prompt_override: z.boolean().optional(),
     strip_tool_types: z.string().optional(),
     bridge_tool_types: z.string().optional(),
+    // When set, this channel never inherits global tool hosting bindings.
+    disable_global_tool_hosting: z.boolean().optional(),
     hosted_web_search: hostedToolSchema,
     hosted_image_generation: hostedToolSchema,
     // Type-specific settings (stored in settings JSON)
@@ -581,6 +587,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   system_prompt_override: false,
   strip_tool_types: '',
   bridge_tool_types: '',
+  disable_global_tool_hosting: false,
   hosted_web_search: { ...defaultHostedToolValues },
   hosted_image_generation: { ...defaultHostedToolValues },
   // Type-specific settings
@@ -625,6 +632,7 @@ export function transformChannelToFormDefaults(
     system_prompt_override: false,
     strip_tool_types: '',
     bridge_tool_types: '',
+    disable_global_tool_hosting: false,
     hosted_web_search: { ...defaultHostedToolValues } as HostedToolFormValues,
     hosted_image_generation: {
       ...defaultHostedToolValues,
@@ -643,6 +651,9 @@ export function transformChannelToFormDefaults(
         : []
       const emulateList: string[] = Array.isArray(parsed.emulate_tool_types)
         ? parsed.emulate_tool_types
+        : []
+      const excludeList: string[] = Array.isArray(parsed.exclude_tool_types)
+        ? parsed.exclude_tool_types
         : []
       const backends = parsed.emulated_tool_backends || {}
       const managedTypes = [
@@ -664,15 +675,19 @@ export function transformChannelToFormDefaults(
         bridge_tool_types: Array.isArray(parsed.bridge_tool_types)
           ? parsed.bridge_tool_types.join(',')
           : '',
+        disable_global_tool_hosting:
+          parsed.disable_global_tool_hosting === true,
         hosted_web_search: hostedToolFromSettings(
           stripList,
           emulateList,
+          excludeList,
           backends.web_search,
           HOSTED_TOOL_WEB_SEARCH
         ),
         hosted_image_generation: hostedToolFromSettings(
           stripList,
           emulateList,
+          excludeList,
           backends.image_generation,
           HOSTED_TOOL_IMAGE_GENERATION
         ),
@@ -821,6 +836,7 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     ),
   ]
   const emulateToolTypes: string[] = []
+  const excludeToolTypes: string[] = []
   const emulatedToolBackends: Record<
     string,
     {
@@ -839,6 +855,8 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     if (!values || values.action !== 'emulate' || !values.provider.trim()) {
       if (values?.action === 'strip') {
         stripToolTypes.push(toolType)
+      } else if (values?.action === 'exclude') {
+        excludeToolTypes.push(toolType)
       }
       continue
     }
@@ -864,8 +882,14 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     }
     emulatedToolBackends[toolType] = backend
   }
+  if (formData.disable_global_tool_hosting === true) {
+    settingObj.disable_global_tool_hosting = true
+  }
   if (stripToolTypes.length > 0) {
     settingObj.strip_tool_types = stripToolTypes
+  }
+  if (excludeToolTypes.length > 0) {
+    settingObj.exclude_tool_types = excludeToolTypes
   }
 
   const bridgeToolTypes = [

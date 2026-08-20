@@ -664,24 +664,24 @@ func TestChannelSettingsEmulateToolTypes(t *testing.T) {
 
 	require.Nil(t, (&ChannelSettings{EmulateToolTypes: []string{"web_search"}}).EmulatedWebSearchBackend(), "no backend configured")
 	require.Nil(t, (&ChannelSettings{
-		EmulateToolTypes:    []string{"web_search"},
+		EmulateToolTypes:     []string{"web_search"},
 		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Provider: "gemini"}},
 	}).EmulatedWebSearchBackend(), "backend without api key is unusable")
 	backend := (&ChannelSettings{
-		EmulateToolTypes:    []string{"web_search"},
+		EmulateToolTypes:     []string{"web_search"},
 		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Provider: "gemini", APIKey: "k", Model: "gemini-2.5-flash"}},
 	}).EmulatedWebSearchBackend()
 	require.NotNil(t, backend)
 	assert.Equal(t, "gemini", backend.Provider)
 
 	searxng := (&ChannelSettings{
-		EmulateToolTypes:    []string{"web_search"},
+		EmulateToolTypes:     []string{"web_search"},
 		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Provider: "searxng", APIBase: "http://localhost:8888"}},
 	}).EmulatedWebSearchBackend()
 	require.NotNil(t, searxng, "searxng runs without an api key")
 
 	require.NotNil(t, (&ChannelSettings{
-		EmulateToolTypes:    []string{"image_generation"},
+		EmulateToolTypes:     []string{"image_generation"},
 		EmulatedToolBackends: map[string]EmulatedToolBackend{"image_generation": {Provider: "openai_images", APIKey: "k"}},
 	}).EmulatedImageBackend())
 
@@ -701,38 +701,84 @@ func TestChannelSettingsValidateEmulatedTools(t *testing.T) {
 	require.NoError(t, (*ChannelSettings)(nil).ValidateEmulatedTools())
 	require.NoError(t, (&ChannelSettings{}).ValidateEmulatedTools(), "nothing emulated, nothing to validate")
 	require.NoError(t, (&ChannelSettings{
-		EmulateToolTypes:    []string{"web_search", "web_search_preview"},
+		EmulateToolTypes:     []string{"web_search", "web_search_preview"},
 		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Provider: "gemini", APIKey: "k"}},
 	}).ValidateEmulatedTools(), "web_search_preview folds onto the web_search backend")
 
 	assert.Error(t, (&ChannelSettings{EmulateToolTypes: []string{"web_search"}}).ValidateEmulatedTools(), "emulated without a backend")
 	assert.Error(t, (&ChannelSettings{
-		EmulateToolTypes:    []string{"web_search"},
+		EmulateToolTypes:     []string{"web_search"},
 		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Provider: "google", APIKey: "k"}},
 	}).ValidateEmulatedTools(), "unknown provider")
 	assert.Error(t, (&ChannelSettings{
-		EmulateToolTypes:    []string{"web_search"},
+		EmulateToolTypes:     []string{"web_search"},
 		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Provider: "tavily"}},
 	}).ValidateEmulatedTools(), "keyed provider without a key")
 	assert.Error(t, (&ChannelSettings{
-		EmulateToolTypes:    []string{"web_search"},
+		EmulateToolTypes:     []string{"web_search"},
 		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Provider: "searxng"}},
 	}).ValidateEmulatedTools(), "searxng without api_base")
 	assert.Error(t, (&ChannelSettings{
-		EmulateToolTypes:    []string{"web_search"},
+		EmulateToolTypes:     []string{"web_search"},
 		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Provider: "http_json", APIBase: "https://example.com/search?q={query}"}},
 	}).ValidateEmulatedTools(), "http_json without result_path")
 	assert.Error(t, (&ChannelSettings{
-		EmulateToolTypes:    []string{"image_generation"},
+		EmulateToolTypes:     []string{"image_generation"},
 		EmulatedToolBackends: map[string]EmulatedToolBackend{"image_generation": {Provider: "tavily", APIKey: "k"}},
 	}).ValidateEmulatedTools(), "search provider on an image tool")
 
 	require.NoError(t, (&ChannelSettings{
-		EmulateToolTypes:    []string{"web_search"},
+		EmulateToolTypes:     []string{"web_search"},
 		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Provider: "http_json", APIBase: "https://example.com/search?q={query}", Extra: map[string]string{"result_path": "items"}}},
 	}).ValidateEmulatedTools(), "http_json fully configured")
 	require.NoError(t, (&ChannelSettings{
-		EmulateToolTypes:    []string{"image_generation"},
+		EmulateToolTypes:     []string{"image_generation"},
 		EmulatedToolBackends: map[string]EmulatedToolBackend{"image_generation": {Provider: "openai_images", APIKey: "k"}},
 	}).ValidateEmulatedTools())
+}
+
+func TestChannelSettingsEmulatedRecognitionAndChannel(t *testing.T) {
+	require.Nil(t, (&ChannelSettings{EmulateToolTypes: []string{"image_recognition"}}).EmulatedRecognitionBackend(), "no backend configured")
+
+	backend := (&ChannelSettings{
+		EmulateToolTypes:     []string{"image_recognition"},
+		EmulatedToolBackends: map[string]EmulatedToolBackend{"image_recognition": {Provider: "gemini", APIKey: "k"}},
+	}).EmulatedRecognitionBackend()
+	require.NotNil(t, backend)
+	assert.Equal(t, "gemini", backend.Provider)
+
+	chBackend := (&ChannelSettings{
+		EmulateToolTypes:     []string{"web_search"},
+		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Provider: "channel", ChannelID: 6, Executor: "gemini"}},
+	}).EmulatedWebSearchBackend()
+	require.NotNil(t, chBackend)
+
+	require.NoError(t, (&ChannelSettings{
+		EmulateToolTypes:     []string{"image_recognition"},
+		EmulatedToolBackends: map[string]EmulatedToolBackend{"image_recognition": {Provider: "openai", APIKey: "k", Model: "gpt-4o-mini"}},
+	}).ValidateEmulatedTools())
+	require.Error(t, (&ChannelSettings{
+		EmulateToolTypes:     []string{"web_search"},
+		EmulatedToolBackends: map[string]EmulatedToolBackend{"web_search": {Provider: "channel"}},
+	}).ValidateEmulatedTools(), "channel without channel_id")
+	require.Error(t, (&ChannelSettings{
+		EmulateToolTypes:     []string{"image_recognition"},
+		EmulatedToolBackends: map[string]EmulatedToolBackend{"image_recognition": {Provider: "tavily", APIKey: "k"}},
+	}).ValidateEmulatedTools(), "search provider on recognition kind")
+	require.Error(t, (&ChannelSettings{
+		EmulateToolTypes:     []string{"image_recognition"},
+		EmulatedToolBackends: map[string]EmulatedToolBackend{"image_recognition": {Provider: "gemini"}},
+	}).ValidateEmulatedTools(), "keyed recognition provider without key")
+}
+
+func TestChannelSettingsExcludeAndInherit(t *testing.T) {
+	require.Nil(t, (&ChannelSettings{}).ExcludeToolTypeSet())
+	require.Nil(t, (*ChannelSettings)(nil).ExcludeToolTypeSet())
+	require.True(t, (&ChannelSettings{}).GlobalToolHostingEnabled(), "absent flag means inherit")
+	require.True(t, (*ChannelSettings)(nil).GlobalToolHostingEnabled())
+	require.False(t, (&ChannelSettings{DisableGlobalToolHosting: true}).GlobalToolHostingEnabled())
+
+	set := (&ChannelSettings{ExcludeToolTypes: []string{"web_search", "image_recognition"}}).ExcludeToolTypeSet()
+	require.Len(t, set, 2)
+	assert.Contains(t, set, "web_search")
 }

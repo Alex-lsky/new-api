@@ -85,8 +85,21 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	var requestBody io.Reader
 	var emulatedBaseBody []byte
 	bridgeKinds := info.ChannelSetting.BridgeToolTypeSet()
-	// hosted tools the gateway executes itself need to survive strip lists
-	emulateBackends := info.ChannelSetting.EmulatedBackendsForRequest()
+	// hosted tools the gateway executes itself need to survive strip lists.
+	// Local channel config wins; tool types the channel did not pin inherit the
+	// global tool hosting binding for this model (unless excluded or disabled).
+	modelForToolHosting := info.OriginModelName
+	if modelForToolHosting == "" {
+		modelForToolHosting = info.UpstreamModelName
+	}
+	emulateBackends := mergeGlobalToolHosting(
+		info.ChannelSetting.EmulatedBackendsForRequest(),
+		info.ChannelSetting.StripToolTypeSet(),
+		info.ChannelSetting.ExcludeToolTypeSet(),
+		info.ChannelSetting.GlobalToolHostingEnabled(),
+		modelForToolHosting,
+	)
+	emulateSet := emulatedTypeSetFromBackends(emulateBackends)
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
@@ -133,7 +146,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 				if bridge == nil {
 					bridge = relaycommon.NewResponsesClientToolBridge()
 				}
-				if emulated := emulateResponsesHostedTools(raw, info.ChannelSetting.EmulateToolTypeSet(), bridge); !bytes.Equal(emulated, raw) {
+				if emulated := emulateResponsesHostedTools(raw, emulateSet, bridge); !bytes.Equal(emulated, raw) {
 					logger.LogDebug(c, "requestBody after emulate_tool_types: %s", emulated)
 					info.ClientToolBridge = bridge
 					info.EmulatedTools = emulateBackends
@@ -197,7 +210,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			if bridge == nil {
 				bridge = relaycommon.NewResponsesClientToolBridge()
 			}
-			if emulated := emulateResponsesHostedTools(jsonData, info.ChannelSetting.EmulateToolTypeSet(), bridge); !bytes.Equal(emulated, jsonData) {
+			if emulated := emulateResponsesHostedTools(jsonData, emulateSet, bridge); !bytes.Equal(emulated, jsonData) {
 				jsonData = emulated
 				info.ClientToolBridge = bridge
 				info.EmulatedTools = emulateBackends

@@ -293,6 +293,121 @@ func TestEmulatedCallsFromCapturedImage(t *testing.T) {
 // image emulation end to end: round 1 calls image_generation, round 2 answers.
 // The base64 payload must never travel upstream, and the client must receive
 // a native image_generation_call item carrying it.
+func TestEmulateResponsesHostedToolsInjectsRecognition(t *testing.T) {
+	// no tools at all: the injected image_recognition function is added so
+	// text-only upstreams can still call a vision backend
+	body := []byte(`{"model":"m","input":"look at my cat photo"}`)
+	bridge := relaycommon.NewResponsesClientToolBridge()
+	out := emulateResponsesHostedTools(body, map[string]struct{}{"image_recognition": {}}, bridge)
+	tools := gjson.GetBytes(out, "tools").Array()
+	require.Len(t, tools, 1, "recognition tool injected")
+	assert.Equal(t, "function", tools[0].Get("type").String())
+	assert.Equal(t, "image_recognition", tools[0].Get("name").String())
+	assert.True(t, gjson.GetBytes(out, `tools.#(name=="image_recognition").parameters.properties.question`).Exists())
+
+	body = []byte(`{"model":"m","input":"x","tools":[{"type":"function","name":"shell"}]}`)
+	out = emulateResponsesHostedTools(body, map[string]struct{}{"image_recognition": {}}, relaycommon.NewResponsesClientToolBridge())
+	tools = gjson.GetBytes(out, "tools").Array()
+	require.Len(t, tools, 2)
+	assert.Equal(t, "shell", tools[0].Get("name").String())
+
+	assert.Equal(t, string(body), string(emulateResponsesHostedTools(body, nil, relaycommon.NewResponsesClientToolBridge())), "no emulation -> byte-identical")
+}
+
+func TestEmulateResponsesRecognitionHistoryExpansion(t *testing.T) {
+	body := []byte(`{
+		"model": "m",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"analyze"}]},
+			{"type":"image_recognition_call","id":"ir_1","status":"completed","action":{"type":"recognize","question":"what animal"},"summary":"a cat"},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}
+		],
+		"tools": [{"type":"function","name":"image_recognition"}]
+	}`)
+	out := emulateResponsesHostedTools(body, map[string]struct{}{"image_recognition": {}}, relaycommon.NewResponsesClientToolBridge())
+	input := gjson.GetBytes(out, "input").Array()
+	require.Len(t, input, 4, "recognition call expands into function_call + function_call_output")
+	assert.Equal(t, "function_call", input[1].Get("type").String())
+	assert.Equal(t, "image_recognition", input[1].Get("name").String())
+	assert.Contains(t, input[1].Get("arguments").String(), `"question":"what animal"`)
+	assert.Equal(t, "function_call_output", input[2].Get("type").String())
+	assert.Equal(t, "message", input[3].Get("type").String())
+}
+
+func TestEmulatedCallsFromCapturedRecognition(t *testing.T) {
+	info := &relaycommon.RelayInfo{ClientToolBridge: newTestBridgeWithRecognition()}
+	captured := []byte(`{"id":"r","output":[
+		{"id":"fc_1","type":"function_call","call_id":"call_1","name":"image_recognition","arguments":"{\"question\":\"what is it\"}"},
+		{"id":"ir_2","type":"image_recognition_call","call_id":"ir_2","status":"completed","action":{"type":"recognize","question":"how tall"},"summary":"10m"}
+	]}`)
+	calls := emulatedCallsFromCaptured(captured, info)
+	require.Len(t, calls, 2)
+	assert.Equal(t, relaycommon.ResponsesClientToolImageRecognition, calls[0].Kind)
+	assert.Equal(t, relaycommon.ResponsesClientToolImageRecognition, calls[1].Kind)
+	assert.Contains(t, calls[1].Arguments, "how tall")
+}
+
+func newTestBridgeWithRecognition() *relaycommon.ResponsesClientToolBridge {
+	bridge := relaycommon.NewResponsesClientToolBridge()
+	bridge.Register("image_recognition", relaycommon.ResponsesClientToolSpec{Kind: relaycommon.ResponsesClientToolImageRecognition, Name: "image_recognition"})
+	return bridge
+}
+
+// recognition emulation end to end: the upstream calls the injected
+// image_recognition function, the gateway runs the vision backend (openai
+// vision stub), and the client receives a restored image_recognition_call.
+func TestRunResponsesEmulationLoopRecognition(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	visionStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"It is a fluffy cat."}}]}`))
+	}))
+	defer visionStub.Close()
+
+	recorder := httptest.NewRecorder()
+	testCtx, _ := gin.CreateTestContext(recorder)
+	testCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	info := &relaycommon.RelayInfo{ClientToolBridge: newTestBridgeWithRecognition()}
+
+	round := 0
+	var upstreamBodies []string
+	doResponse := func(resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+		round++
+		if round == 1 {
+			_, _ = testCtx.Writer.Write([]byte(`{"id":"r1","status":"completed","output":[{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"image_recognition","arguments":"{\"question\":\"what animal\"}"}],"usage":{"input_tokens":8,"output_tokens":3,"total_tokens":11}}`))
+			return &dto.Usage{PromptTokens: 8, CompletionTokens: 3, TotalTokens: 11}, nil
+		}
+		_, _ = testCtx.Writer.Write([]byte(`{"id":"r2","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"it is a cat"}]}],"usage":{"input_tokens":6,"output_tokens":2,"total_tokens":8}}`))
+		return &dto.Usage{PromptTokens: 6, CompletionTokens: 2, TotalTokens: 8}, nil
+	}
+
+	backends := map[string]*dto.EmulatedToolBackend{
+		dto.EmulatedToolTypeRecognition: {Provider: dto.EmulatedRecognitionProviderOpenAI, APIKey: "vk", APIBase: visionStub.URL},
+	}
+	baseBody := []byte(`{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"what animal is in the photo"},{"type":"input_image","image_url":"https://example.com/cat.png"}]}],"tools":[{"type":"function","name":"image_recognition"}]}`)
+	usage, apiErr := runResponsesEmulationLoop(testCtx, info,
+		func(body io.Reader) (any, error) {
+			data, _ := io.ReadAll(body)
+			upstreamBodies = append(upstreamBodies, string(data))
+			return &http.Response{StatusCode: http.StatusOK}, nil
+		},
+		doResponse,
+		baseBody, backends)
+	require.Nil(t, apiErr)
+	require.NotNil(t, usage)
+	assert.Equal(t, 14, usage.PromptTokens, "usage summed across rounds")
+
+	require.Len(t, upstreamBodies, 2)
+	followUp := gjson.GetBytes([]byte(upstreamBodies[1]), "input").Array()
+	output := followUp[2].Get("output").String()
+	assert.Contains(t, output, "fluffy cat", "vision result fed back upstream")
+
+	client := recorder.Body.String()
+	assert.Contains(t, client, `"type":"image_recognition_call"`, "native recognition item restored")
+	assert.Contains(t, client, `"summary":"It is a fluffy cat."`)
+	assert.Contains(t, client, `"question":"what animal"`)
+	assert.Contains(t, client, "it is a cat", "final answer forwarded")
+}
+
 func TestRunResponsesEmulationLoopImage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const imagePayload = "aWNvbi1pbWFnZS1ieXRlcw=="

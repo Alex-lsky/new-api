@@ -40,28 +40,38 @@ type ChannelSettings struct {
 	// capability is needed on the gateway.
 	BridgeToolTypes []string `json:"bridge_tool_types,omitempty"`
 	// EmulateToolTypes lists hosted OpenAI Responses tool types (currently
-	// "web_search" / "web_search_preview" and "image_generation") that this
-	// gateway executes itself: the declaration is rewritten into a function
-	// tool for the upstream, and when the model calls it the gateway runs the
-	// configured backend for that tool type (EmulatedToolBackends), feeds the
-	// results back and iterates until the final answer. Clients see native
-	// web_search_call / image_generation_call items without any client-side
-	// configuration.
+	// "web_search" / "web_search_preview", "image_generation" and the
+	// gateway-injected "image_recognition") that this gateway executes itself:
+	// the declaration is rewritten into a function tool for the upstream, and
+	// when the model calls it the gateway runs the configured backend for that
+	// tool type (EmulatedToolBackends), feeds the results back and iterates
+	// until the final answer. Clients see native web_search_call /
+	// image_generation_call / image_recognition_call items without any
+	// client-side configuration.
 	EmulateToolTypes []string `json:"emulate_tool_types,omitempty"`
 	// EmulatedToolBackends configures the executor per emulated tool type
-	// ("web_search" and "image_generation" today).
+	// ("web_search", "image_generation" and "image_recognition" today).
 	EmulatedToolBackends map[string]EmulatedToolBackend `json:"emulated_tool_backends,omitempty"`
+	// ExcludeToolTypes lists hosted tool types explicitly taken out of global
+	// tool hosting (tool_hosting global bindings) for this channel. Unlike
+	// strip_tool_types, the tool is not removed from the request — it is just
+	// not emulated by the gateway.
+	ExcludeToolTypes []string `json:"exclude_tool_types,omitempty"`
+	// DisableGlobalToolHosting opts this channel out of the global tool hosting
+	// module entirely. Absent (false) means the channel inherits global
+	// per-model bindings for tool types it does not pin itself.
+	DisableGlobalToolHosting bool `json:"disable_global_tool_hosting,omitempty"`
 }
 
 // Web search executor providers for EmulatedToolBackend.Provider when the
 // emulated tool type is web_search.
 const (
-	EmulatedSearchProviderGemini   = "gemini"   // Google AI Studio "Grounding with Google Search"
-	EmulatedSearchProviderZhipu    = "zhipu"    // Zhipu (GLM) web_search API; Model selects search_engine
-	EmulatedSearchProviderTavily   = "tavily"   // api.tavily.com
-	EmulatedSearchProviderBrave    = "brave"    // Brave Search API
-	EmulatedSearchProviderBocha    = "bocha"    // Bocha (博查) web search
-	EmulatedSearchProviderSearXNG  = "searxng"  // self-hosted SearXNG, keyless
+	EmulatedSearchProviderGemini   = "gemini"    // Google AI Studio "Grounding with Google Search"
+	EmulatedSearchProviderZhipu    = "zhipu"     // Zhipu (GLM) web_search API; Model selects search_engine
+	EmulatedSearchProviderTavily   = "tavily"    // api.tavily.com
+	EmulatedSearchProviderBrave    = "brave"     // Brave Search API
+	EmulatedSearchProviderBocha    = "bocha"     // Bocha (博查) web search
+	EmulatedSearchProviderSearXNG  = "searxng"   // self-hosted SearXNG, keyless
 	EmulatedSearchProviderHTTPJSON = "http_json" // generic JSON endpoint, api_base template + Extra
 )
 
@@ -72,20 +82,42 @@ const (
 	EmulatedImageProviderGemini = "gemini_images" // Gemini image output via generateContent
 )
 
+// Image recognition (vision) executor providers.
+const (
+	EmulatedRecognitionProviderGemini = "gemini" // Gemini generateContent with inline image
+	EmulatedRecognitionProviderOpenAI = "openai" // OpenAI-compatible chat-completions vision
+)
+
+// EmulatedChannelProvider marks a backend that borrows the credentials of an
+// existing channel (EmulatedToolBackend.ChannelID). Which standard executor
+// runs is given by EmulatedToolBackend.Executor.
+const EmulatedChannelProvider = "channel"
+
 // Emulated tool types that can be configured on a channel.
 const (
-	EmulatedToolTypeWebSearch = "web_search"
-	EmulatedToolTypeImage     = "image_generation"
+	EmulatedToolTypeWebSearch   = "web_search"
+	EmulatedToolTypeImage       = "image_generation"
+	EmulatedToolTypeRecognition = "image_recognition"
 )
 
 // EmulatedToolBackend is the executor configuration for one emulated hosted
 // tool. Which providers are valid depends on the tool type (web_search vs
-// image_generation); api_base exists so tests can point executors at a stub.
+// image_generation vs image_recognition); api_base exists so tests can point
+// executors at a stub.
 type EmulatedToolBackend struct {
 	Provider string `json:"provider,omitempty"`
 	APIKey   string `json:"api_key,omitempty"`
 	Model    string `json:"model,omitempty"`
 	APIBase  string `json:"api_base,omitempty"`
+	// ChannelID selects the channel whose key/base_url back this executor when
+	// Provider is "channel". The credentials are resolved at execution time so
+	// multi-key channels pick a healthy key per call.
+	ChannelID int64 `json:"channel_id,omitempty"`
+	// Executor is the standard executor used with the referenced channel's
+	// credentials when Provider is "channel" (e.g. "gemini", "tavily",
+	// "openai_images"). Recognition backends default to the channel's native
+	// chat endpoint when unset.
+	Executor string `json:"executor,omitempty"`
 	// Extra carries provider-specific options. Today only the http_json
 	// search provider uses it: "request_body" (JSON template with {query})
 	// and "result_path" (gjson path into the response).
@@ -111,28 +143,58 @@ func emulatedImageProviders() map[string]struct{} {
 	}
 }
 
+func emulatedRecognitionProviders() map[string]struct{} {
+	return map[string]struct{}{
+		EmulatedRecognitionProviderGemini: {},
+		EmulatedRecognitionProviderOpenAI: {},
+	}
+}
+
+// EmulatedToolProviders returns the allowed standalone (non-channel) executors
+// for one emulated tool type.
+func EmulatedToolProviders(toolType string) map[string]struct{} {
+	switch toolType {
+	case EmulatedToolTypeWebSearch:
+		return emulatedSearchProviders()
+	case EmulatedToolTypeImage:
+		return emulatedImageProviders()
+	case EmulatedToolTypeRecognition:
+		return emulatedRecognitionProviders()
+	default:
+		return nil
+	}
+}
+
 // backendUsable reports whether the backend can execute. SearXNG and the
-// generic http_json endpoint can run without an API key; every other provider
-// authenticates with one.
+// generic http_json endpoint can run without an API key; a channel reference
+// needs a channel id; every other provider authenticates with one.
 func backendUsable(toolType string, backend *EmulatedToolBackend) bool {
 	if backend == nil {
 		return false
 	}
+	provider := strings.ToLower(strings.TrimSpace(backend.Provider))
+	if provider == EmulatedChannelProvider {
+		return backend.ChannelID > 0
+	}
 	switch toolType {
 	case EmulatedToolTypeWebSearch:
-		if _, ok := emulatedSearchProviders()[strings.ToLower(strings.TrimSpace(backend.Provider))]; !ok {
+		if _, ok := emulatedSearchProviders()[provider]; !ok {
 			return false
 		}
 	case EmulatedToolTypeImage:
-		if _, ok := emulatedImageProviders()[strings.ToLower(strings.TrimSpace(backend.Provider))]; !ok {
+		if _, ok := emulatedImageProviders()[provider]; !ok {
+			return false
+		}
+	case EmulatedToolTypeRecognition:
+		if _, ok := emulatedRecognitionProviders()[provider]; !ok {
 			return false
 		}
 	default:
 		return false
 	}
 	return backend.APIKey != "" ||
-		strings.EqualFold(backend.Provider, EmulatedSearchProviderSearXNG) ||
-		strings.EqualFold(backend.Provider, EmulatedSearchProviderHTTPJSON)
+		strings.EqualFold(provider, EmulatedSearchProviderSearXNG) ||
+		strings.EqualFold(provider, EmulatedSearchProviderHTTPJSON)
 }
 
 // StripToolTypeSet returns the normalized strip_tool_types blacklist as a set.
@@ -206,9 +268,42 @@ func (s *ChannelSettings) EmulatedImageBackend() *EmulatedToolBackend {
 	return &backend
 }
 
+// EmulatedRecognitionBackend returns the image recognition backend
+// configuration when image_recognition emulation is enabled for this channel.
+func (s *ChannelSettings) EmulatedRecognitionBackend() *EmulatedToolBackend {
+	if s == nil {
+		return nil
+	}
+	if _, ok := s.EmulateToolTypeSet()[EmulatedToolTypeRecognition]; !ok {
+		return nil
+	}
+	backend := s.EmulatedToolBackends[EmulatedToolTypeRecognition]
+	if !backendUsable(EmulatedToolTypeRecognition, &backend) {
+		return nil
+	}
+	return &backend
+}
+
+// ExcludeToolTypeSet returns the normalized exclude_tool_types set.
+func (s *ChannelSettings) ExcludeToolTypeSet() map[string]struct{} {
+	if s == nil {
+		return nil
+	}
+	return normalizeToolTypeSet(s.ExcludeToolTypes)
+}
+
+// GlobalToolHostingEnabled reports whether this channel inherits global tool
+// hosting bindings (absent = enabled).
+func (s *ChannelSettings) GlobalToolHostingEnabled() bool {
+	if s == nil {
+		return true
+	}
+	return !s.DisableGlobalToolHosting
+}
+
 // EmulatedBackendsForRequest returns the executor backends keyed by tool type
-// for every emulated tool this channel configured. Empty map means the request
-// must not run through the emulation loop.
+// for every emulated tool this channel configured. Empty map means no local
+// emulated tooling.
 func (s *ChannelSettings) EmulatedBackendsForRequest() map[string]*EmulatedToolBackend {
 	if s == nil {
 		return nil
@@ -216,15 +311,21 @@ func (s *ChannelSettings) EmulatedBackendsForRequest() map[string]*EmulatedToolB
 	var backends map[string]*EmulatedToolBackend
 	if backend := s.EmulatedWebSearchBackend(); backend != nil {
 		if backends == nil {
-			backends = make(map[string]*EmulatedToolBackend, 2)
+			backends = make(map[string]*EmulatedToolBackend, 3)
 		}
 		backends[EmulatedToolTypeWebSearch] = backend
 	}
 	if backend := s.EmulatedImageBackend(); backend != nil {
 		if backends == nil {
-			backends = make(map[string]*EmulatedToolBackend, 2)
+			backends = make(map[string]*EmulatedToolBackend, 3)
 		}
 		backends[EmulatedToolTypeImage] = backend
+	}
+	if backend := s.EmulatedRecognitionBackend(); backend != nil {
+		if backends == nil {
+			backends = make(map[string]*EmulatedToolBackend, 3)
+		}
+		backends[EmulatedToolTypeRecognition] = backend
 	}
 	return backends
 }
@@ -235,7 +336,7 @@ func (s *ChannelSettings) ValidateEmulatedTools() error {
 	if s == nil {
 		return nil
 	}
-	for _, toolType := range []string{EmulatedToolTypeWebSearch, "web_search_preview", EmulatedToolTypeImage} {
+	for _, toolType := range []string{EmulatedToolTypeWebSearch, "web_search_preview", EmulatedToolTypeImage, EmulatedToolTypeRecognition} {
 		if _, emulated := s.EmulateToolTypeSet()[toolType]; !emulated {
 			continue
 		}
@@ -249,28 +350,55 @@ func (s *ChannelSettings) ValidateEmulatedTools() error {
 		if !configured {
 			return fmt.Errorf("emulate_tool_types includes %q but emulated_tool_backends.%s is not configured", toolType, toolType)
 		}
-		if strings.TrimSpace(backend.Provider) == "" {
-			return fmt.Errorf("emulated_tool_backends.%s.provider is required", toolType)
+		if err := validateEmulatedBackend(toolType, &backend); err != nil {
+			return err
 		}
-		if _, ok := emulatedSearchProviders()[strings.ToLower(strings.TrimSpace(backend.Provider))]; toolType == EmulatedToolTypeWebSearch && !ok {
-			return fmt.Errorf("unknown web search provider %q (supported: gemini, zhipu, tavily, brave, bocha, searxng, http_json)", backend.Provider)
+	}
+	return nil
+}
+
+func validateEmulatedBackend(toolType string, backend *EmulatedToolBackend) error {
+	if backend == nil {
+		return fmt.Errorf("emulated_tool_backends.%s is empty", toolType)
+	}
+	provider := strings.ToLower(strings.TrimSpace(backend.Provider))
+	if provider == EmulatedChannelProvider {
+		if backend.ChannelID <= 0 {
+			return fmt.Errorf("emulated_tool_backends.%s.provider channel requires channel_id", toolType)
 		}
-		if _, ok := emulatedImageProviders()[strings.ToLower(strings.TrimSpace(backend.Provider))]; toolType == EmulatedToolTypeImage && !ok {
-			return fmt.Errorf("unknown image generation provider %q (supported: openai_images, gemini_images)", backend.Provider)
+		if toolType != EmulatedToolTypeRecognition && strings.TrimSpace(backend.Executor) == "" && strings.TrimSpace(backend.APIKey) == "" {
+			return fmt.Errorf("emulated_tool_backends.%s.provider channel requires an executor or api_key fallback", toolType)
 		}
-		if backend.APIKey == "" && !strings.EqualFold(backend.Provider, EmulatedSearchProviderSearXNG) && !strings.EqualFold(backend.Provider, EmulatedSearchProviderHTTPJSON) {
-			return fmt.Errorf("emulated_tool_backends.%s.api_key is required for provider %q", toolType, backend.Provider)
+		return nil
+	}
+	switch toolType {
+	case EmulatedToolTypeWebSearch:
+		if _, ok := emulatedSearchProviders()[provider]; !ok {
+			return fmt.Errorf("unknown web search provider %q (supported: gemini, zhipu, tavily, brave, bocha, searxng, http_json, channel)", backend.Provider)
 		}
-		if strings.EqualFold(backend.Provider, EmulatedSearchProviderSearXNG) && strings.TrimSpace(backend.APIBase) == "" {
-			return fmt.Errorf("emulated_tool_backends.%s.api_base is required for searxng (your instance URL)", toolType)
+	case EmulatedToolTypeImage:
+		if _, ok := emulatedImageProviders()[provider]; !ok {
+			return fmt.Errorf("unknown image generation provider %q (supported: openai_images, gemini_images, channel)", backend.Provider)
 		}
-		if strings.EqualFold(backend.Provider, EmulatedSearchProviderHTTPJSON) {
-			if strings.TrimSpace(backend.APIBase) == "" || !strings.Contains(backend.APIBase, "{query}") {
-				return fmt.Errorf("emulated_tool_backends.%s.api_base must be a URL template containing {query} for http_json", toolType)
-			}
-			if strings.TrimSpace(backend.Extra["result_path"]) == "" {
-				return fmt.Errorf("emulated_tool_backends.%s.extra.result_path is required for http_json", toolType)
-			}
+	case EmulatedToolTypeRecognition:
+		if _, ok := emulatedRecognitionProviders()[provider]; !ok {
+			return fmt.Errorf("unknown image recognition provider %q (supported: gemini, openai, channel)", backend.Provider)
+		}
+	default:
+		return fmt.Errorf("unsupported emulated tool type %q", toolType)
+	}
+	if backend.APIKey == "" && !strings.EqualFold(provider, EmulatedSearchProviderSearXNG) && !strings.EqualFold(provider, EmulatedSearchProviderHTTPJSON) {
+		return fmt.Errorf("emulated_tool_backends.%s.api_key is required for provider %q", toolType, backend.Provider)
+	}
+	if strings.EqualFold(provider, EmulatedSearchProviderSearXNG) && strings.TrimSpace(backend.APIBase) == "" {
+		return fmt.Errorf("emulated_tool_backends.%s.api_base is required for searxng (your instance URL)", toolType)
+	}
+	if strings.EqualFold(provider, EmulatedSearchProviderHTTPJSON) {
+		if strings.TrimSpace(backend.APIBase) == "" || !strings.Contains(backend.APIBase, "{query}") {
+			return fmt.Errorf("emulated_tool_backends.%s.api_base must be a URL template containing {query} for http_json", toolType)
+		}
+		if strings.TrimSpace(backend.Extra["result_path"]) == "" {
+			return fmt.Errorf("emulated_tool_backends.%s.extra.result_path is required for http_json", toolType)
 		}
 	}
 	return nil

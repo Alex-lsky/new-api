@@ -25,6 +25,7 @@ import { GeminiSettingsCard } from './gemini-settings-card'
 import { GlobalSettingsCard } from './global-settings-card'
 import { GrokSettingsCard } from './grok-settings-card'
 import { RoutingReliabilitySection } from './routing-reliability-section'
+import { ToolHostingSettingsCard } from './tool-hosting-settings'
 
 function formatJsonForEditor(value: string, fallback: string) {
   const raw = (value ?? '').toString().trim()
@@ -178,6 +179,16 @@ const MODELS_SECTIONS = [
           enabled: settings['model_deployment.ionet.enabled'],
           apiKey: settings['model_deployment.ionet.api_key'],
         }}
+      />
+    ),
+  },
+  {
+    id: 'tool-hosting',
+    titleKey: 'Tool Hosting',
+    build: (settings: ModelSettings) => (
+      <ToolHostingSettingsCard
+        providers={settings['tool_hosting.providers'] ?? '{}'}
+        bindings={settings['tool_hosting.bindings'] ?? '{}'}
       />
     ),
   },

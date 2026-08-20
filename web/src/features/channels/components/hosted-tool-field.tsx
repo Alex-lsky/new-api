@@ -139,6 +139,7 @@ export function HostedToolField({
     { value: 'none', label: t('Leave to upstream') },
     { value: 'strip', label: t('Strip from requests') },
     { value: 'emulate', label: t('Gateway executes (emulate)') },
+    { value: 'exclude', label: t('Exclude from global') },
   ]
 
   return (
@@ -172,10 +173,10 @@ export function HostedToolField({
             <FormDescription>
               {name === 'hosted_web_search'
                 ? t(
-                    'How this channel treats the hosted web_search tool. Emulate rewrites it into a function the model calls; the gateway runs the configured search backend and feeds results back, and clients see native web_search_call items. Channels left as "Leave to upstream" are not affected.'
+                    'How this channel treats the hosted web_search tool. "Gateway executes" runs a search backend the gateway owns and restores native web_search_call items; "Exclude from global" opts this tool out of global tool hosting for this channel. Tool types the channel does not pin follow the global Tool Hosting module (bound per model).'
                   )
                 : t(
-                    'How this channel treats the hosted image_generation tool. Emulate rewrites it into a function the model calls; the gateway runs the configured image backend and restores native image_generation_call items with the generated image. Channels left as "Leave to upstream" are not affected.'
+                    'How this channel treats the hosted image_generation tool. "Gateway executes" runs an image backend the gateway owns and restores native image_generation_call items; "Exclude from global" opts this tool out of global tool hosting for this channel. Tool types the channel does not pin follow the global Tool Hosting module (bound per model).'
                   )}
             </FormDescription>
             <FormMessage />

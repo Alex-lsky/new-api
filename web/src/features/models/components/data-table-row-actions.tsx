@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQueryClient } from '@tanstack/react-query'
 import type { Row } from '@tanstack/react-table'
-import { Pencil, Power, PowerOff, Trash2 } from 'lucide-react'
+import { Pencil, Power, PowerOff, Trash2, Wand2 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -41,6 +41,7 @@ import {
   isModelEnabled,
 } from '../lib'
 import type { Model } from '../types'
+import { ModelToolBindingsDialog } from './dialogs/model-tool-bindings-dialog'
 import { useModels } from './models-provider'
 
 interface DataTableRowActionsProps {
@@ -53,6 +54,7 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const { setOpen, setCurrentRow } = useModels()
   const queryClient = useQueryClient()
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  const [toolBindingsOpen, setToolBindingsOpen] = useState(false)
 
   const isEnabled = isModelEnabled(model)
 
@@ -106,6 +108,22 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
         <TooltipContent>{toggleLabel}</TooltipContent>
       </Tooltip>
 
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              variant='ghost'
+              size='icon-sm'
+              onClick={() => setToolBindingsOpen(true)}
+              aria-label={t('Tool bindings')}
+            />
+          }
+        >
+          <Wand2 />
+        </TooltipTrigger>
+        <TooltipContent>{t('Tool bindings')}</TooltipContent>
+      </Tooltip>
+
       <DataTableRowActionMenu ariaLabel={t('Open menu')}>
         <DropdownMenuItem
           onSelect={(e) => {
@@ -120,6 +138,12 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
           </DropdownMenuShortcut>
         </DropdownMenuItem>
       </DataTableRowActionMenu>
+
+      <ModelToolBindingsDialog
+        modelName={model.model_name}
+        open={toolBindingsOpen}
+        onOpenChange={setToolBindingsOpen}
+      />
 
       <ConfirmDialog
         open={deleteConfirmOpen}
