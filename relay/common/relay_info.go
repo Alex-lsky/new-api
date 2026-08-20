@@ -179,11 +179,12 @@ type RelayInfo struct {
 	// custom/namespace/tool_search call items. Nil when nothing was bridged.
 	ClientToolBridge *ResponsesClientToolBridge
 
-	// EmulatedWebSearch holds the search backend configuration when this
-	// request rewrote the hosted web_search tool into a gateway-executed
-	// function (channel emulate_tool_types). Non-nil only on the rebuild path
-	// of channels that configured a backend.
-	EmulatedWebSearch *dto.EmulatedToolBackend
+	// EmulatedTools holds the executor backend per emulated hosted tool type
+	// ("web_search" / "image_generation") when this request rewrote those
+	// tools into gateway-executed functions (channel emulate_tool_types).
+	// Non-nil only on requests that actually emulated something, in which case
+	// they run through the emulation loop instead of a single upstream shot.
+	EmulatedTools map[string]*dto.EmulatedToolBackend
 
 	// convOptions caches the converter settings snapshot (see ConvOptions).
 	convOptions *convmeta.Options
@@ -249,7 +250,7 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 	// A retry on a different channel must not restore tools bridged for the
 	// previous channel; the request build re-populates it when bridging applies.
 	info.ClientToolBridge = nil
-	info.EmulatedWebSearch = nil
+	info.EmulatedTools = nil
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || channelMeta.ChannelSetting.PassThroughBodyEnabled {
 		info.ReasoningEffort = ""
 	} else {

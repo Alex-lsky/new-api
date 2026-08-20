@@ -85,13 +85,14 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	var requestBody io.Reader
 	var emulatedBaseBody []byte
 	bridgeKinds := info.ChannelSetting.BridgeToolTypeSet()
-	emulateBackend := info.ChannelSetting.EmulatedWebSearchBackend()
+	// hosted tools the gateway executes itself need to survive strip lists
+	emulateBackends := info.ChannelSetting.EmulatedBackendsForRequest()
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
-		if stripToolTypes := info.ChannelSetting.StripToolTypeSet(); stripToolTypes != nil {
+		if stripToolTypes := exemptEmulatedFromStrip(info.ChannelSetting.StripToolTypeSet(), emulateBackends); stripToolTypes != nil {
 			raw, err := storage.Bytes()
 			if err == nil {
 				stripped := stripResponsesToolTypes(raw, stripToolTypes)
@@ -122,7 +123,25 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 				}
 			}
 		}
-		if requestBody == nil {
+		// hosted tools the gateway executes itself: rewrite declarations into
+		// functions and remember the backends so the request runs through the
+		// emulation loop instead of a single shot
+		if len(emulateBackends) > 0 && requestBody == nil {
+			raw, err := storage.Bytes()
+			if err == nil {
+				bridge := info.ClientToolBridge
+				if bridge == nil {
+					bridge = relaycommon.NewResponsesClientToolBridge()
+				}
+				if emulated := emulateResponsesHostedTools(raw, info.ChannelSetting.EmulateToolTypeSet(), bridge); !bytes.Equal(emulated, raw) {
+					logger.LogDebug(c, "requestBody after emulate_tool_types: %s", emulated)
+					info.ClientToolBridge = bridge
+					info.EmulatedTools = emulateBackends
+					emulatedBaseBody = emulated
+				}
+			}
+		}
+		if requestBody == nil && info.EmulatedTools == nil {
 			requestBody = common.NewReplayableBodyReader(storage)
 		}
 	} else {
@@ -153,15 +172,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		// strip channel-blacklisted tool types last so nothing re-introduces
 		// a tool the upstream rejects; emulated tools are exempt because the
 		// gateway rewrites them into functions it can execute itself
-		stripToolTypes := info.ChannelSetting.StripToolTypeSet()
-		if emulateBackend != nil && stripToolTypes != nil {
-			delete(stripToolTypes, "web_search")
-			delete(stripToolTypes, "web_search_preview")
-			if len(stripToolTypes) == 0 {
-				stripToolTypes = nil
-			}
-		}
-		if stripToolTypes != nil {
+		if stripToolTypes := exemptEmulatedFromStrip(info.ChannelSetting.StripToolTypeSet(), emulateBackends); stripToolTypes != nil {
 			jsonData = stripResponsesToolTypes(jsonData, stripToolTypes)
 		}
 
@@ -178,10 +189,10 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			}
 		}
 
-		// hosted web_search the gateway executes itself: rewrite the
-		// declaration into a function and remember the backend so the request
-		// runs through the emulation loop instead of a single shot
-		if emulateBackend != nil {
+		// hosted tools the gateway executes itself: rewrite the declarations
+		// into functions and remember the backends so the request runs through
+		// the emulation loop instead of a single shot
+		if len(emulateBackends) > 0 {
 			bridge := info.ClientToolBridge
 			if bridge == nil {
 				bridge = relaycommon.NewResponsesClientToolBridge()
@@ -189,12 +200,12 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			if emulated := emulateResponsesHostedTools(jsonData, info.ChannelSetting.EmulateToolTypeSet(), bridge); !bytes.Equal(emulated, jsonData) {
 				jsonData = emulated
 				info.ClientToolBridge = bridge
-				info.EmulatedWebSearch = emulateBackend
+				info.EmulatedTools = emulateBackends
 				emulatedBaseBody = jsonData
 			}
 		}
 
-		if info.EmulatedWebSearch == nil {
+		if info.EmulatedTools == nil {
 			logger.LogDebug(c, "requestBody: %s", jsonData)
 			body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 			if err != nil {
@@ -210,9 +221,9 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	statusCodeMappingStr := c.GetString("status_code_mapping")
 
 	var usageDto *dto.Usage
-	if info.EmulatedWebSearch != nil {
+	if info.EmulatedTools != nil {
 		// gateway-executed hosted tools: iterate upstream rounds, execute the
-		// search calls in between, and only the final round reaches the client
+		// tool calls in between, and only the final round reaches the client
 		usage, loopErr := runResponsesEmulationLoop(c, info,
 			func(body io.Reader) (any, error) {
 				return adaptor.DoRequest(c, info, body)
@@ -228,7 +239,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 				}
 				return roundUsage, nil
 			},
-			emulatedBaseBody, info.EmulatedWebSearch)
+			emulatedBaseBody, info.EmulatedTools)
 		if loopErr != nil {
 			service.ResetStatusCode(loopErr, statusCodeMappingStr)
 			return loopErr

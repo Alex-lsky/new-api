@@ -19,90 +19,165 @@ import (
 )
 
 // maxEmulationRounds bounds how many times the gateway may go back to the
-// upstream with search results. It is sized with generous headroom so a model
+// upstream with tool results. It is sized with generous headroom so a model
 // that refines its query across several searches still gets a final round to
 // produce an answer; the loop terminates early the moment upstream returns no
-// search calls.
+// emulated calls.
 const maxEmulationRounds = 8
 
-const emulatedWebSearchFunctionName = "web_search"
+const (
+	emulatedWebSearchFunctionName = "web_search"
+	emulatedImageFunctionName     = "image_generation"
+)
 
-// emulatedToolCall is one search call the model made against an emulated tool.
+// emulatedToolCall is one call the model made against an emulated hosted
+// tool. Result/ImageB64 are filled in when the gateway executes the call.
 type emulatedToolCall struct {
 	CallID    string
 	Name      string
 	Arguments string
+	Kind      relaycommon.ResponsesClientToolKind
+	// Result is the text fed back to the model as the function_call_output.
+	Result string
+	// ImageB64 is the generated image payload (bare base64) restored to the
+	// client in a native image_generation_call item. Only set for
+	// image_generation calls.
+	ImageB64 string
+}
+
+// exemptEmulatedFromStrip removes tool types the gateway emulates from the
+// strip blacklist: their declarations must survive so the emulation rewrite
+// can turn them into gateway-executed functions.
+func exemptEmulatedFromStrip(stripSet map[string]struct{}, backends map[string]*dto.EmulatedToolBackend) map[string]struct{} {
+	if len(stripSet) == 0 || len(backends) == 0 {
+		return stripSet
+	}
+	stripped := make(map[string]struct{}, len(stripSet))
+	for toolType := range stripSet {
+		if _, emulated := backends[toolType]; emulated {
+			continue
+		}
+		if toolType == "web_search_preview" {
+			if _, emulated := backends[dto.EmulatedToolTypeWebSearch]; emulated {
+				continue
+			}
+		}
+		stripped[toolType] = struct{}{}
+	}
+	if len(stripped) == 0 {
+		return nil
+	}
+	return stripped
 }
 
 // emulateResponsesHostedTools rewrites emulated hosted tool declarations
-// (web_search / web_search_preview per the channel's emulate_tool_types) into
-// an ordinary web_search function tool, and rewrites matching web_search_call
-// history items into function form. Bodies with nothing to emulate are
+// (web_search / web_search_preview / image_generation per the channel's
+// emulate_tool_types) into ordinary function tools, and rewrites matching
+// history call items into function form. Bodies with nothing to emulate are
 // returned byte-identical.
 func emulateResponsesHostedTools(body []byte, emulateSet map[string]struct{}, bridge *relaycommon.ResponsesClientToolBridge) []byte {
 	if len(emulateSet) == 0 || len(body) == 0 {
 		return body
 	}
 	tools := gjson.GetBytes(body, "tools")
-	rewrittenInput, inputChanged := rewriteWebSearchHistory(gjson.GetBytes(body, "input"))
+	rewrittenInput, inputChanged := rewriteEmulatedToolHistory(gjson.GetBytes(body, "input"), emulateSet)
 	if !tools.IsArray() && !inputChanged {
 		return body
 	}
 
-	changed := false
+	changed := inputChanged
 	emittedSearch := false
+	emittedImage := false
 	newTools := make([][]byte, 0, len(tools.Array()))
 	for _, tool := range tools.Array() {
 		toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
-		if toolType != "web_search" && toolType != "web_search_preview" {
-			newTools = append(newTools, []byte(tool.Raw))
-			continue
-		}
-		if _, emulated := emulateSet[toolType]; !emulated {
-			// tolerate unfolded sets: web_search_preview shares the executor
-			if toolType == "web_search_preview" {
-				_, emulated = emulateSet["web_search"]
+		switch toolType {
+		case "web_search", "web_search_preview":
+			if _, emulated := emulateSet[toolType]; !emulated {
+				// tolerate unfolded sets: web_search_preview shares the executor
+				if toolType == "web_search_preview" {
+					_, emulated = emulateSet["web_search"]
+				}
+				if !emulated {
+					newTools = append(newTools, []byte(tool.Raw))
+					continue
+				}
 			}
-			if !emulated {
+			if emittedSearch {
+				// a second web_search declaration is the same tool; forwarding a
+				// duplicate function name would be rejected upstream
+				changed = true
+				continue
+			}
+			replacement := marshaledTool(map[string]any{
+				"type":        "function",
+				"name":        emulatedWebSearchFunctionName,
+				"description": "Search the web for current information and return a grounded answer with source links.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{"type": "string", "description": "The search query."},
+					},
+					"required": []string{"query"},
+				},
+			})
+			if replacement == nil || !bridge.Register(emulatedWebSearchFunctionName, relaycommon.ResponsesClientToolSpec{
+				Kind: relaycommon.ResponsesClientToolWebSearch,
+				Name: emulatedWebSearchFunctionName,
+			}) {
 				newTools = append(newTools, []byte(tool.Raw))
 				continue
 			}
-		}
-		if emittedSearch {
-			// a second web_search declaration is the same tool; forwarding a
-			// duplicate function name would be rejected upstream
+			newTools = append(newTools, replacement)
+			emittedSearch = true
+			changed = true
+			continue
+		case "image_generation":
+			if _, emulated := emulateSet[toolType]; !emulated {
+				newTools = append(newTools, []byte(tool.Raw))
+				continue
+			}
+			if emittedImage {
+				changed = true
+				continue
+			}
+			replacement := marshaledTool(map[string]any{
+				"type":        "function",
+				"name":        emulatedImageFunctionName,
+				"description": "Generate an image from a text prompt. The image is delivered to the user as the result of this call; describe it in your reply instead of embedding data.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"prompt": map[string]any{"type": "string", "description": "Text description of the image to generate."},
+						"size":   map[string]any{"type": "string", "enum": []string{"auto", "1024x1024", "1536x1024", "1024x1536"}, "description": "Image size."},
+						"quality": map[string]any{
+							"type": "string", "enum": []string{"auto", "high", "medium", "low"},
+							"description": "Image quality.",
+						},
+					},
+					"required": []string{"prompt"},
+				},
+			})
+			if replacement == nil || !bridge.Register(emulatedImageFunctionName, relaycommon.ResponsesClientToolSpec{
+				Kind: relaycommon.ResponsesClientToolImageGeneration,
+				Name: emulatedImageFunctionName,
+			}) {
+				newTools = append(newTools, []byte(tool.Raw))
+				continue
+			}
+			newTools = append(newTools, replacement)
+			emittedImage = true
 			changed = true
 			continue
 		}
-		replacement := marshaledTool(map[string]any{
-			"type":        "function",
-			"name":        emulatedWebSearchFunctionName,
-			"description": "Search the web for current information and return a grounded answer with source links.",
-			"parameters": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"query": map[string]any{"type": "string", "description": "The search query."},
-				},
-				"required": []string{"query"},
-			},
-		})
-		if replacement == nil || !bridge.Register(emulatedWebSearchFunctionName, relaycommon.ResponsesClientToolSpec{
-			Kind: relaycommon.ResponsesClientToolWebSearch,
-			Name: emulatedWebSearchFunctionName,
-		}) {
-			newTools = append(newTools, []byte(tool.Raw))
-			continue
-		}
-		newTools = append(newTools, replacement)
-		emittedSearch = true
-		changed = true
+		newTools = append(newTools, []byte(tool.Raw))
 	}
 
-	if !changed && !inputChanged {
+	if !changed {
 		return body
 	}
 	result := body
-	if changed {
+	if tools.IsArray() {
 		var b strings.Builder
 		b.WriteByte('[')
 		for i, raw := range newTools {
@@ -118,9 +193,18 @@ func emulateResponsesHostedTools(body []byte, emulateSet map[string]struct{}, br
 			return body
 		}
 	}
-	for index, raw := range rewrittenInput {
+	if inputChanged {
+		var b strings.Builder
+		b.WriteByte('[')
+		for i, raw := range rewrittenInput {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.Write(raw)
+		}
+		b.WriteByte(']')
 		var err error
-		result, err = sjson.SetRawBytes(result, fmt.Sprintf("input.%d", index), raw)
+		result, err = sjson.SetRawBytes(result, "input", []byte(b.String()))
 		if err != nil {
 			return body
 		}
@@ -128,35 +212,93 @@ func emulateResponsesHostedTools(body []byte, emulateSet map[string]struct{}, br
 	return result
 }
 
-// rewriteWebSearchHistory turns native web_search_call history items into the
-// function form the upstream expects. Returns per-index replacements.
-func rewriteWebSearchHistory(input gjson.Result) (map[int][]byte, bool) {
+// rewriteEmulatedToolHistory turns native web_search_call and
+// image_generation_call history items into the function form the upstream
+// expects. An image call expands into a function_call plus a marker
+// function_call_output so the upstream never sees an unpaired call. Returns
+// the rebuilt items and whether anything changed.
+func rewriteEmulatedToolHistory(input gjson.Result, emulateSet map[string]struct{}) ([][]byte, bool) {
 	if !input.IsArray() {
 		return nil, false
 	}
-	rewritten := make(map[int][]byte)
-	for i, item := range input.Array() {
-		if strings.ToLower(strings.TrimSpace(item.Get("type").String())) != "web_search_call" {
-			continue
+	items := input.Array()
+	rewritten := make([][]byte, 0, len(items))
+	changed := false
+	_, searchEmulated := emulateSet["web_search"]
+	_, imageEmulated := emulateSet["image_generation"]
+	for _, item := range items {
+		switch strings.ToLower(strings.TrimSpace(item.Get("type").String())) {
+		case "web_search_call":
+			if !searchEmulated {
+				break
+			}
+			callID := item.Get("call_id").String()
+			if callID == "" {
+				callID = item.Get("id").String()
+			}
+			arguments, _ := common.Marshal(map[string]any{"query": item.Get("action.query").String()})
+			if replacement := marshaledTool(map[string]any{
+				"type":      "function_call",
+				"call_id":   callID,
+				"name":      emulatedWebSearchFunctionName,
+				"arguments": string(arguments),
+			}); replacement != nil {
+				rewritten = append(rewritten, replacement)
+				changed = true
+				continue
+			}
+		case "image_generation_call":
+			if !imageEmulated {
+				break
+			}
+			callID := item.Get("call_id").String()
+			if callID == "" {
+				callID = item.Get("id").String()
+			}
+			args := imageArgsFromHistoryItem(item)
+			arguments, _ := common.Marshal(args)
+			if replacement := marshaledTool(map[string]any{
+				"type":      "function_call",
+				"call_id":   callID,
+				"name":      emulatedImageFunctionName,
+				"arguments": string(arguments),
+			}); replacement != nil {
+				rewritten = append(rewritten, replacement)
+				if output := marshaledTool(map[string]any{
+					"type":    "function_call_output",
+					"call_id": callID,
+					"output":  "image generated and already delivered to the user",
+				}); output != nil {
+					rewritten = append(rewritten, output)
+				}
+				changed = true
+				continue
+			}
 		}
-		callID := item.Get("call_id").String()
-		if callID == "" {
-			callID = item.Get("id").String()
-		}
-		arguments, _ := common.Marshal(map[string]any{"query": item.Get("action.query").String()})
-		rewritten[i] = marshaledTool(map[string]any{
-			"type":      "function_call",
-			"call_id":   callID,
-			"name":      emulatedWebSearchFunctionName,
-			"arguments": string(arguments),
-		})
+		rewritten = append(rewritten, []byte(item.Raw))
 	}
-	return rewritten, len(rewritten) > 0
+	return rewritten, changed
+}
+
+// imageArgsFromHistoryItem best-effort extracts the generation arguments of
+// a client-echoed image_generation_call item.
+func imageArgsFromHistoryItem(item gjson.Result) map[string]any {
+	args := map[string]any{}
+	if prompt := firstGjsonString(item, "prompt", "action.prompt", "revised_prompt"); prompt != "" {
+		args["prompt"] = prompt
+	}
+	if size := firstGjsonString(item, "size", "action.size"); size != "" {
+		args["size"] = size
+	}
+	if quality := firstGjsonString(item, "quality", "action.quality"); quality != "" {
+		args["quality"] = quality
+	}
+	return args
 }
 
 // captureWriter buffers everything the relay writes during one emulation
 // round, so intermediate rounds never reach the client and the final round can
-// be flushed (with search items prepended) once it is known to be final.
+// be flushed (with tool items prepended) once it is known to be final.
 type captureWriter struct {
 	gin.ResponseWriter
 	buf bytes.Buffer
@@ -169,13 +311,13 @@ func (w *captureWriter) WriteHeaderNow()                   {}
 
 // runResponsesEmulationLoop drives the gateway-side hosted-tool execution:
 // each round sends the (progressively extended) request upstream with the
-// client's writer buffered; if the model called the emulated web_search
-// function, the gateway executes the search, appends the calls and results to
+// client's writer buffered; if the model called an emulated tool function,
+// the gateway executes the matching backend, appends the calls and results to
 // the input and iterates. The first round without emulated calls is flushed to
-// the client as the final answer, with native web_search_call items spliced in
-// front. Usage is summed across rounds so billing matches the real upstream
-// consumption.
-func runResponsesEmulationLoop(c *gin.Context, info *relaycommon.RelayInfo, doRequest func(io.Reader) (any, error), doResponse func(*http.Response) (*dto.Usage, *types.NewAPIError), baseBody []byte, backend *dto.EmulatedToolBackend) (*dto.Usage, *types.NewAPIError) {
+// the client as the final answer, with native web_search_call /
+// image_generation_call items spliced in front. Usage is summed across rounds
+// so billing matches the real upstream consumption.
+func runResponsesEmulationLoop(c *gin.Context, info *relaycommon.RelayInfo, doRequest func(io.Reader) (any, error), doResponse func(*http.Response) (*dto.Usage, *types.NewAPIError), baseBody []byte, backends map[string]*dto.EmulatedToolBackend) (*dto.Usage, *types.NewAPIError) {
 	totalUsage := &dto.Usage{}
 	body := baseBody
 	executed := make([]emulatedToolCall, 0, 2)
@@ -212,7 +354,7 @@ func runResponsesEmulationLoop(c *gin.Context, info *relaycommon.RelayInfo, doRe
 		calls := emulatedCallsFromCaptured(captured.buf.Bytes(), info)
 		if len(calls) == 0 || round == maxEmulationRounds-1 {
 			if len(calls) > 0 {
-				logger.LogWarn(c.Request.Context(), fmt.Sprintf("emulation round cap reached, forwarding response with %d unexecuted search calls", len(calls)))
+				logger.LogWarn(c.Request.Context(), fmt.Sprintf("emulation round cap reached, forwarding response with %d unexecuted tool calls", len(calls)))
 			}
 			prepend := executed
 			if round == maxEmulationRounds-1 {
@@ -225,10 +367,13 @@ func runResponsesEmulationLoop(c *gin.Context, info *relaycommon.RelayInfo, doRe
 		}
 		executed = append(executed, calls...)
 
-		next, err := appendEmulatedToolResults(body, calls, captured.buf.Bytes(), backend, c)
+		next, executedCalls, err := appendEmulatedToolResults(body, calls, captured.buf.Bytes(), backends, c)
 		if err != nil {
 			return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
+		// the executed snapshots must observe the execution results (image
+		// payloads in particular), so replace the pre-execution copies
+		copy(executed[len(executed)-len(calls):], executedCalls)
 		body = next
 	}
 	return totalUsage, nil
@@ -236,13 +381,22 @@ func runResponsesEmulationLoop(c *gin.Context, info *relaycommon.RelayInfo, doRe
 
 // appendEmulatedToolResults executes every emulated call of the round and
 // extends the request input with the model's calls (plus its reasoning items,
-// mirroring what a native client echoes back) and the search results.
-func appendEmulatedToolResults(body []byte, calls []emulatedToolCall, captured []byte, backend *dto.EmulatedToolBackend, c *gin.Context) ([]byte, error) {
+// mirroring what a native client echoes back) and the tool results. Calls are
+// executed in place; the mutated slice is returned for the final restore.
+func appendEmulatedToolResults(body []byte, calls []emulatedToolCall, captured []byte, backends map[string]*dto.EmulatedToolBackend, c *gin.Context) ([]byte, []emulatedToolCall, error) {
 	appended := reasoningItemsFromCaptured(captured)
-	for _, call := range calls {
-		query := webSearchQuery(call.Arguments)
-		result := executeEmulatedWebSearch(c.Request.Context(), query, backend)
-		logger.LogDebug(c, "emulated web_search %q -> %.200s", query, result)
+	for i := range calls {
+		call := &calls[i]
+		switch call.Kind {
+		case relaycommon.ResponsesClientToolImageGeneration:
+			result := executeEmulatedImageGeneration(c.Request.Context(), call.Arguments, backends[dto.EmulatedToolTypeImage])
+			call.Result = result.Output
+			call.ImageB64 = result.ImageB64
+			logger.LogDebug(c, "emulated image_generation %q -> %.200s", emulatedImagePrompt(call.Arguments), result.Output)
+		default:
+			call.Result = executeEmulatedWebSearch(c.Request.Context(), webSearchQuery(call.Arguments), backends[dto.EmulatedToolTypeWebSearch])
+			logger.LogDebug(c, "emulated web_search %q -> %.200s", webSearchQuery(call.Arguments), call.Result)
+		}
 		callItem, err := common.Marshal(map[string]any{
 			"type":      "function_call",
 			"call_id":   call.CallID,
@@ -250,19 +404,23 @@ func appendEmulatedToolResults(body []byte, calls []emulatedToolCall, captured [
 			"arguments": call.Arguments,
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		outputItem, err := common.Marshal(map[string]any{
 			"type":    "function_call_output",
 			"call_id": call.CallID,
-			"output":  result,
+			"output":  call.Result,
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		appended = append(appended, callItem, outputItem)
 	}
-	return appendInputItems(body, appended)
+	body, err := appendInputItems(body, appended)
+	if err != nil {
+		return nil, nil, err
+	}
+	return body, calls, nil
 }
 
 // appendInputItems appends raw JSON items to the request input, wrapping a
@@ -301,9 +459,9 @@ func appendInputItems(body []byte, items [][]byte) ([]byte, error) {
 }
 
 // emulatedCallsFromCaptured scans one round's buffered output (stream frames
-// or a plain JSON body) for search calls the gateway must execute. The buffer
-// holds the client-facing form, so both shapes count: the bridged
-// function_call and the already-restored native web_search_call.
+// or a plain JSON body) for calls the gateway must execute. The buffer holds
+// the client-facing form, so both shapes count: the bridged function_call and
+// the already-restored native call item.
 func emulatedCallsFromCaptured(captured []byte, info *relaycommon.RelayInfo) []emulatedToolCall {
 	seen := make(map[string]struct{})
 	var calls []emulatedToolCall
@@ -314,13 +472,14 @@ func emulatedCallsFromCaptured(captured []byte, info *relaycommon.RelayInfo) []e
 		case "function_call":
 			name := strings.TrimSpace(item.Get("name").String())
 			spec, ok := info.ClientToolBridge.Lookup(name)
-			if !ok || spec.Kind != relaycommon.ResponsesClientToolWebSearch {
+			if !ok || (spec.Kind != relaycommon.ResponsesClientToolWebSearch && spec.Kind != relaycommon.ResponsesClientToolImageGeneration) {
 				return
 			}
 			call = emulatedToolCall{
 				CallID:    strings.TrimSpace(item.Get("call_id").String()),
 				Name:      name,
 				Arguments: item.Get("arguments").String(),
+				Kind:      spec.Kind,
 			}
 		case "web_search_call":
 			arguments, _ := common.Marshal(map[string]any{"query": item.Get("action.query").String()})
@@ -328,6 +487,14 @@ func emulatedCallsFromCaptured(captured []byte, info *relaycommon.RelayInfo) []e
 				CallID:    strings.TrimSpace(item.Get("call_id").String()),
 				Name:      emulatedWebSearchFunctionName,
 				Arguments: string(arguments),
+				Kind:      relaycommon.ResponsesClientToolWebSearch,
+			}
+		case "image_generation_call":
+			call = emulatedToolCall{
+				CallID:    strings.TrimSpace(item.Get("call_id").String()),
+				Name:      emulatedImageFunctionName,
+				Arguments: string(imageHistoryArguments(item)),
+				Kind:      relaycommon.ResponsesClientToolImageGeneration,
 			}
 		default:
 			return
@@ -344,6 +511,13 @@ func emulatedCallsFromCaptured(captured []byte, info *relaycommon.RelayInfo) []e
 
 	forEachCapturedOutputItem(captured, collect)
 	return calls
+}
+
+// imageHistoryArguments renders an image call item's generation arguments as
+// JSON suitable for the function form.
+func imageHistoryArguments(item gjson.Result) []byte {
+	arguments, _ := common.Marshal(imageArgsFromHistoryItem(item))
+	return arguments
 }
 
 // reasoningItemsFromCaptured returns the round's reasoning output items (with
@@ -430,15 +604,64 @@ func webSearchQuery(arguments string) string {
 	return arguments
 }
 
+func emulatedImagePrompt(arguments string) string {
+	if strings.TrimSpace(arguments) == "" {
+		return ""
+	}
+	var envelope map[string]any
+	if err := common.Unmarshal([]byte(arguments), &envelope); err == nil {
+		if prompt, ok := envelope["prompt"].(string); ok {
+			return prompt
+		}
+	}
+	return arguments
+}
+
+// restoredToolItem renders the client-facing native item for one executed
+// emulated call: web_search_call items carry the query, image_generation_call
+// items carry the generated image as bare base64.
+func restoredToolItem(call emulatedToolCall) map[string]any {
+	if call.Kind == relaycommon.ResponsesClientToolImageGeneration {
+		args := parseEmulatedImageArgs(call.Arguments)
+		action := map[string]any{"type": "generate", "prompt": args.Prompt}
+		if args.Size != "" {
+			action["size"] = args.Size
+		}
+		if args.Quality != "" {
+			action["quality"] = args.Quality
+		}
+		item := map[string]any{
+			"id":      callIDOrDefault(call),
+			"call_id": call.CallID,
+			"type":    "image_generation_call",
+			"action":  action,
+		}
+		if call.ImageB64 != "" {
+			item["status"] = "completed"
+			item["result"] = call.ImageB64
+		} else {
+			item["status"] = "failed"
+		}
+		return item
+	}
+	return map[string]any{
+		"id":      callIDOrDefault(call),
+		"call_id": call.CallID,
+		"type":    "web_search_call",
+		"status":  "completed",
+		"action":  map[string]any{"type": "search", "query": webSearchQuery(call.Arguments)},
+	}
+}
+
 // flushFinalResponse replays the final buffered round to the client. For
-// streams, native web_search_call item events are spliced in after the
-// response preamble and every remaining frame's output_index is shifted so the
-// client observes one coherent sequence (synthetic events carry no
-// sequence_number, matching the reasoning-injection precedent). Non-stream
-// bodies get the restored items spliced to the front of the output array.
+// streams, native tool item events are spliced in after the response preamble
+// and every remaining frame's output_index is shifted so the client observes
+// one coherent sequence (synthetic events carry no sequence_number, matching
+// the reasoning-injection precedent). Non-stream bodies get the restored
+// items spliced to the front of the output array.
 func flushFinalResponse(c *gin.Context, captured []byte, calls []emulatedToolCall, totalUsage *dto.Usage) error {
 	// the buffered DoResponse set Content-Length for the un-prepend body on
-	// the real writer; the spliced-in search items make it stale
+	// the real writer; the spliced-in tool items make it stale
 	c.Writer.Header().Del("Content-Length")
 	if !isLikelySSE(captured) {
 		if len(calls) == 0 && totalUsage == nil {
@@ -453,13 +676,7 @@ func flushFinalResponse(c *gin.Context, captured []byte, calls []emulatedToolCal
 		output, _ := body["output"].([]any)
 		extra := make([]any, 0, len(calls))
 		for _, call := range calls {
-			extra = append(extra, map[string]any{
-				"id":      callIDOrDefault(call),
-				"call_id": call.CallID,
-				"type":    "web_search_call",
-				"status":  "completed",
-				"action":  map[string]any{"type": "search", "query": webSearchQuery(call.Arguments)},
-			})
+			extra = append(extra, restoredToolItem(call))
 		}
 		body["output"] = append(extra, output...)
 		if totalUsage != nil {
@@ -487,7 +704,7 @@ func flushFinalResponse(c *gin.Context, captured []byte, calls []emulatedToolCal
 					return err
 				}
 				if len(calls) > 0 {
-					if err := writeSyntheticSearchItemEvents(c, calls); err != nil {
+					if err := writeSyntheticToolItemEvents(c, calls); err != nil {
 						return err
 					}
 				}
@@ -514,7 +731,7 @@ func summedUsageJSON(total *dto.Usage) map[string]any {
 	}
 	if total.PromptTokensDetails.CachedTokens != 0 || total.PromptTokensDetails.CacheWriteTokens != 0 {
 		usage["input_tokens_details"] = map[string]any{
-			"cached_tokens":     total.PromptTokensDetails.CachedTokens,
+			"cached_tokens":      total.PromptTokensDetails.CachedTokens,
 			"cache_write_tokens": total.PromptTokensDetails.CacheWriteTokens,
 		}
 	}
@@ -524,6 +741,9 @@ func summedUsageJSON(total *dto.Usage) map[string]any {
 func callIDOrDefault(call emulatedToolCall) string {
 	if call.CallID != "" {
 		return call.CallID
+	}
+	if call.Kind == relaycommon.ResponsesClientToolImageGeneration {
+		return "ig_" + common.GetUUID()
 	}
 	return "ws_" + common.GetUUID()
 }
@@ -537,7 +757,7 @@ func sseFrameEvent(frame []byte) string {
 	return ""
 }
 
-// shiftFrameIndexes bumps output_index of one SSE frame so spliced-in search
+// shiftFrameIndexes bumps output_index of one SSE frame so spliced-in tool
 // items keep the client's item ordering monotone, and rewrites the terminal
 // event's usage to the summed total.
 func shiftFrameIndexes(frame []byte, indexShift int, totalUsage *dto.Usage) ([]byte, error) {
@@ -576,33 +796,29 @@ func writeFrame(c *gin.Context, frame []byte) error {
 	return err
 }
 
-// writeSyntheticSearchItemEvents emits added/done event pairs for the executed
-// searches so the client renders them like native web_search calls.
-func writeSyntheticSearchItemEvents(c *gin.Context, calls []emulatedToolCall) error {
+// writeSyntheticToolItemEvents emits added/done event pairs for the executed
+// calls so the client renders them like native web_search_call /
+// image_generation_call items.
+func writeSyntheticToolItemEvents(c *gin.Context, calls []emulatedToolCall) error {
 	for i, call := range calls {
+		addedItem := restoredToolItem(call)
+		addedItem["status"] = "in_progress"
 		added, err := common.Marshal(map[string]any{
 			"type":         "response.output_item.added",
 			"output_index": i,
-			"item": map[string]any{
-				"id":      callIDOrDefault(call),
-				"call_id": call.CallID,
-				"type":    "web_search_call",
-				"status":  "in_progress",
-			},
+			"item":         addedItem,
 		})
 		if err != nil {
 			return err
 		}
+		doneItem := restoredToolItem(call)
+		if _, hasStatus := doneItem["status"]; !hasStatus {
+			doneItem["status"] = "completed"
+		}
 		done, err := common.Marshal(map[string]any{
 			"type":         "response.output_item.done",
 			"output_index": i,
-			"item": map[string]any{
-				"id":      callIDOrDefault(call),
-				"call_id": call.CallID,
-				"type":    "web_search_call",
-				"status":  "completed",
-				"action":  map[string]any{"type": "search", "query": webSearchQuery(call.Arguments)},
-			},
+			"item":         doneItem,
 		})
 		if err != nil {
 			return err

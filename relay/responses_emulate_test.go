@@ -95,7 +95,7 @@ func TestEmulatedCallsFromCapturedStream(t *testing.T) {
 	assert.Equal(t, "call_1", calls[0].CallID)
 	assert.Equal(t, `{"query":"go"}`, calls[0].Arguments)
 
-	reasoning := reasoningItemsFromCaptured([]byte("event: response.output_item.done\ndata: "+`{"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","encrypted_content":"abc"}}`+"\n\n"))
+	reasoning := reasoningItemsFromCaptured([]byte("event: response.output_item.done\ndata: " + `{"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","encrypted_content":"abc"}}` + "\n\n"))
 	require.Len(t, reasoning, 1)
 	assert.Contains(t, string(reasoning[0]), "encrypted_content")
 }
@@ -156,7 +156,9 @@ func TestRunResponsesEmulationLoopStream(t *testing.T) {
 	usage, apiErr := runResponsesEmulationLoop(testCtx, info, doRequest, func(resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 		u, e := doResponse(resp)
 		return u, e
-	}, baseBody, &dto.EmulatedToolBackend{Provider: "gemini", APIKey: "test-key", APIBase: geminiStub.URL})
+	}, baseBody, map[string]*dto.EmulatedToolBackend{
+		dto.EmulatedToolTypeWebSearch: {Provider: "gemini", APIKey: "test-key", APIBase: geminiStub.URL},
+	})
 	require.Nil(t, apiErr)
 	require.NotNil(t, usage)
 	assert.Equal(t, 40, usage.PromptTokens, "usage summed across rounds")
@@ -208,7 +210,9 @@ func TestRunResponsesEmulationLoopNonStream(t *testing.T) {
 		},
 		doResponse,
 		[]byte(`{"model":"m","input":"q","tools":[{"type":"function","name":"web_search"}]}`),
-		&dto.EmulatedToolBackend{Provider: "gemini", APIKey: "k", APIBase: geminiStub.URL})
+		map[string]*dto.EmulatedToolBackend{
+			dto.EmulatedToolTypeWebSearch: {Provider: "gemini", APIKey: "k", APIBase: geminiStub.URL},
+		})
 	require.Nil(t, apiErr)
 	assert.Equal(t, 18, usage.PromptTokens)
 
@@ -221,4 +225,126 @@ func TestRunResponsesEmulationLoopNonStream(t *testing.T) {
 
 func writeSSE(c *gin.Context, event string, data string) {
 	_, _ = c.Writer.Write([]byte("event: " + event + "\ndata: " + data + "\n\n"))
+}
+
+func newTestBridgeWithImage() *relaycommon.ResponsesClientToolBridge {
+	bridge := relaycommon.NewResponsesClientToolBridge()
+	bridge.Register("image_generation", relaycommon.ResponsesClientToolSpec{Kind: relaycommon.ResponsesClientToolImageGeneration, Name: "image_generation"})
+	return bridge
+}
+
+func TestEmulateResponsesImageDeclaration(t *testing.T) {
+	body := []byte(`{
+		"model": "m",
+		"input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"draw a cat"}]}],
+		"tools": [
+			{"type":"web_search"},
+			{"type":"image_generation"},
+			{"type":"image_generation","size":"1024x1024"}
+		]
+	}`)
+	bridge := relaycommon.NewResponsesClientToolBridge()
+	out := emulateResponsesHostedTools(body, map[string]struct{}{"web_search": {}, "image_generation": {}}, bridge)
+
+	tools := gjson.GetBytes(out, "tools").Array()
+	require.Len(t, tools, 2, "duplicate image_generation collapses; hosted kinds replaced")
+	assert.Equal(t, "function", tools[0].Get("type").String())
+	assert.Equal(t, "web_search", tools[0].Get("name").String())
+	assert.Equal(t, "function", tools[1].Get("type").String())
+	assert.Equal(t, "image_generation", tools[1].Get("name").String())
+	assert.Equal(t, "string", gjson.GetBytes(out, `tools.#(name=="image_generation").parameters.properties.prompt.type`).String())
+}
+
+func TestEmulateResponsesImageHistoryExpansion(t *testing.T) {
+	body := []byte(`{
+		"model": "m",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"draw a cat"}]},
+			{"type":"image_generation_call","id":"ig_1","status":"completed","action":{"type":"generate","prompt":"a cat"},"result":"AAAA"},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"here you go"}]}
+		],
+		"tools": [{"type":"image_generation"}]
+	}`)
+	out := emulateResponsesHostedTools(body, map[string]struct{}{"image_generation": {}}, relaycommon.NewResponsesClientToolBridge())
+	input := gjson.GetBytes(out, "input").Array()
+	require.Len(t, input, 4, "image call expands into function_call + function_call_output")
+	assert.Equal(t, "function_call", input[1].Get("type").String())
+	assert.Equal(t, "image_generation", input[1].Get("name").String())
+	assert.Contains(t, input[1].Get("arguments").String(), `"prompt":"a cat"`)
+	assert.Equal(t, "function_call_output", input[2].Get("type").String())
+	assert.Equal(t, "ig_1", input[2].Get("call_id").String())
+	assert.Equal(t, "message", input[3].Get("type").String(), "following items preserved")
+}
+
+func TestEmulatedCallsFromCapturedImage(t *testing.T) {
+	info := &relaycommon.RelayInfo{ClientToolBridge: newTestBridgeWithImage()}
+	captured := []byte(`{"id":"r","output":[
+		{"id":"fc_1","type":"function_call","call_id":"call_1","name":"image_generation","arguments":"{\"prompt\":\"a cat\",\"size\":\"1024x1024\"}"},
+		{"id":"ig_2","type":"image_generation_call","call_id":"ig_2","status":"completed","action":{"type":"generate","prompt":"a dog"},"result":"BBBB"}
+	]}`)
+	calls := emulatedCallsFromCaptured(captured, info)
+	require.Len(t, calls, 2)
+	assert.Equal(t, relaycommon.ResponsesClientToolImageGeneration, calls[0].Kind)
+	assert.Equal(t, "a cat", emulatedImagePrompt(calls[0].Arguments))
+	assert.Equal(t, relaycommon.ResponsesClientToolImageGeneration, calls[1].Kind)
+	assert.Equal(t, "a dog", emulatedImagePrompt(calls[1].Arguments))
+}
+
+// image emulation end to end: round 1 calls image_generation, round 2 answers.
+// The base64 payload must never travel upstream, and the client must receive
+// a native image_generation_call item carrying it.
+func TestRunResponsesEmulationLoopImage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const imagePayload = "aWNvbi1pbWFnZS1ieXRlcw=="
+	imageStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/images/generations", r.URL.Path)
+		assert.Equal(t, "Bearer img-key", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"b64_json":"` + imagePayload + `","revised_prompt":"a fluffy cat"}]}`))
+	}))
+	defer imageStub.Close()
+
+	recorder := httptest.NewRecorder()
+	testCtx, _ := gin.CreateTestContext(recorder)
+	testCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	info := &relaycommon.RelayInfo{ClientToolBridge: newTestBridgeWithImage()}
+
+	round := 0
+	var upstreamBodies []string
+	doResponse := func(resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+		round++
+		if round == 1 {
+			_, _ = testCtx.Writer.Write([]byte(`{"id":"r1","status":"completed","output":[{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"image_generation","arguments":"{\"prompt\":\"a cat\",\"size\":\"1024x1024\"}"}],"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}}`))
+			return &dto.Usage{PromptTokens: 10, CompletionTokens: 4, TotalTokens: 14}, nil
+		}
+		_, _ = testCtx.Writer.Write([]byte(`{"id":"r2","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"cat drawn"}]}],"usage":{"input_tokens":8,"output_tokens":2,"total_tokens":10}}`))
+		return &dto.Usage{PromptTokens: 8, CompletionTokens: 2, TotalTokens: 10}, nil
+	}
+
+	usage, apiErr := runResponsesEmulationLoop(testCtx, info,
+		func(body io.Reader) (any, error) {
+			data, _ := io.ReadAll(body)
+			upstreamBodies = append(upstreamBodies, string(data))
+			return &http.Response{StatusCode: http.StatusOK}, nil
+		},
+		doResponse,
+		[]byte(`{"model":"m","input":"draw a cat","tools":[{"type":"function","name":"image_generation"}]}`),
+		map[string]*dto.EmulatedToolBackend{
+			dto.EmulatedToolTypeImage: {Provider: "openai_images", APIKey: "img-key", Model: "gpt-image-1", APIBase: imageStub.URL},
+		})
+	require.Nil(t, apiErr)
+	require.NotNil(t, usage)
+	assert.Equal(t, 18, usage.PromptTokens, "usage summed across rounds")
+
+	require.Len(t, upstreamBodies, 2)
+	followUp := gjson.GetBytes([]byte(upstreamBodies[1]), "input").Array()
+	output := followUp[2].Get("output").String()
+	assert.Contains(t, output, "Image generated", "model sees a text marker")
+	assert.NotContains(t, followUp[2].Get("output").String(), imagePayload, "image bytes never travel upstream")
+
+	client := recorder.Body.String()
+	assert.Contains(t, client, `"type":"image_generation_call"`, "native image item restored")
+	assert.Contains(t, client, `"result":"`+imagePayload+`"`)
+	assert.Contains(t, client, `"prompt":"a cat"`)
+	assert.Contains(t, client, "cat drawn", "final answer forwarded")
 }

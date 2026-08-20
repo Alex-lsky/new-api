@@ -26,6 +26,11 @@ const (
 	// backend and feeds results back, and the final response restores native
 	// web_search_call items for the client.
 	ResponsesClientToolWebSearch ResponsesClientToolKind = "web_search"
+	// ResponsesClientToolImageGeneration marks a hosted image_generation
+	// declaration the gateway executes itself: the model calls the bridged
+	// function, the gateway runs the configured image backend, and the final
+	// response restores native image_generation_call items carrying the image.
+	ResponsesClientToolImageGeneration ResponsesClientToolKind = "image_generation"
 )
 
 // ResponsesClientToolSpec records how a function tool seen by the upstream maps

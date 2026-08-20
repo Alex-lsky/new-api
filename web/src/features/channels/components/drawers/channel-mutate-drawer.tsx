@@ -184,6 +184,11 @@ import {
 } from '../dialogs/missing-models-confirmation-dialog'
 import { ParamOverrideEditorDialog } from '../dialogs/param-override-editor-dialog'
 import { StatusCodeRiskDialog } from '../dialogs/status-code-risk-dialog'
+import {
+  HostedToolField,
+  IMAGE_PROVIDERS,
+  SEARCH_PROVIDERS,
+} from '../hosted-tool-field'
 import { ModelMappingEditor } from '../model-mapping-editor'
 import {
   ChannelAdvancedSection,
@@ -294,7 +299,8 @@ const SENSITIVE_FORM_FIELDS = [
   'system_prompt_override',
   'strip_tool_types',
   'bridge_tool_types',
-  'emulate_tool_types',
+  'hosted_web_search',
+  'hosted_image_generation',
   'allow_service_tier',
   'disable_store',
   'allow_safety_identifier',
@@ -349,7 +355,8 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.system_prompt_override ||
     values.strip_tool_types?.trim() ||
     values.bridge_tool_types?.trim() ||
-    values.emulate_tool_types?.trim() ||
+    values.hosted_web_search?.action !== 'none' ||
+    values.hosted_image_generation?.action !== 'none' ||
     (values.http_protocol && values.http_protocol !== 'auto') ||
     (values.http2_connection_shards != null &&
       values.http2_connection_shards > 1) ||
@@ -4327,28 +4334,18 @@ export function ChannelMutateDrawer({
                               }}
                             />
 
-                            <FormField
+                            <HostedToolField
                               control={form.control}
-                              name='emulate_tool_types'
-                              render={({ field }) => (
-                                <FormItem>
-                                  <FormLabel>
-                                    {t('Emulate Tool Types')}
-                                  </FormLabel>
-                                  <FormControl>
-                                    <Input
-                                      placeholder={t('e.g. web_search')}
-                                      {...field}
-                                    />
-                                  </FormControl>
-                                  <FormDescription>
-                                    {t(
-                                      'Hosted tools the gateway executes itself. web_search is rewritten into a function for the upstream; when the model calls it the gateway runs the configured search backend (emulated_tool_backends in the setting JSON), feeds results back and iterates until the final answer. Clients see native web_search_call items.'
-                                    )}
-                                  </FormDescription>
-                                  <FormMessage />
-                                </FormItem>
-                              )}
+                              name='hosted_web_search'
+                              toolLabel={t('Hosted web_search tool')}
+                              providers={SEARCH_PROVIDERS}
+                            />
+
+                            <HostedToolField
+                              control={form.control}
+                              name='hosted_image_generation'
+                              toolLabel={t('Hosted image_generation tool')}
+                              providers={IMAGE_PROVIDERS}
                             />
 
                             <FormField
@@ -4382,20 +4379,18 @@ export function ChannelMutateDrawer({
                               name='strip_tool_types'
                               render={({ field }) => (
                                 <FormItem>
-                                  <FormLabel>
-                                    {t('Strip Tool Types')}
-                                  </FormLabel>
+                                  <FormLabel>{t('Strip Tool Types')}</FormLabel>
                                   <FormControl>
                                     <Input
                                       placeholder={t(
-                                        'e.g. web_search, image_generation'
+                                        'e.g. file_search, code_interpreter'
                                       )}
                                       {...field}
                                     />
                                   </FormControl>
                                   <FormDescription>
                                     {t(
-                                      'Comma-separated OpenAI Responses tool types removed from requests before forwarding, for upstreams that reject hosted tools. Tool-choice references and include entries of stripped tools are removed too.'
+                                      'Comma-separated extra OpenAI Responses tool types removed from requests before forwarding, for upstreams that reject hosted tools. web_search and image_generation are configured with the hosted tool cards above.'
                                     )}
                                   </FormDescription>
                                   <FormMessage />

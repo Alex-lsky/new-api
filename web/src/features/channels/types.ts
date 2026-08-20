@@ -96,6 +96,7 @@ export interface ChannelSettings {
     api_key?: string
     model?: string
     api_base?: string
+    extra?: Record<string, string>
   }>
 }
 
