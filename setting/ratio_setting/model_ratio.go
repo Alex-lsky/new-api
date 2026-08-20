@@ -5,6 +5,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/price_alias"
 	"github.com/QuantumNous/new-api/types"
 )
 
@@ -363,6 +364,9 @@ func GetModelPrice(name string, printErr bool) (float64, bool) {
 	if price, ok := modelPriceMap.Get(name); ok {
 		return price, true
 	}
+	if target, ok := price_alias.ResolveModelAlias(name); ok && target != name {
+		return GetModelPrice(target, false)
+	}
 
 	if printErr {
 		common.SysError("model price not found: " + name)
@@ -387,6 +391,11 @@ func GetModelRatio(name string) (float64, bool, string) {
 
 	ratio, ok := modelRatioMap.Get(name)
 	if !ok {
+		if target, resolved := price_alias.ResolveModelAlias(name); resolved && target != name {
+			if targetRatio, targetOk, _ := GetModelRatio(target); targetOk {
+				return targetRatio, true, name
+			}
+		}
 		return 37.5, operation_setting.SelfUseModeEnabled, name
 	}
 	return ratio, true, name
@@ -424,6 +433,9 @@ func GetCompletionRatio(name string) float64 {
 			return ratio
 		}
 	}
+	if target, ok := price_alias.ResolveModelAlias(name); ok && target != name {
+		return GetCompletionRatio(target)
+	}
 	hardCodedRatio, contain := getHardcodedCompletionModelRatio(name)
 	if contain {
 		return hardCodedRatio
@@ -449,6 +461,10 @@ func GetCompletionRatioInfo(name string) CompletionRatioInfo {
 				Locked: false,
 			}
 		}
+	}
+
+	if target, ok := price_alias.ResolveModelAlias(name); ok && target != name {
+		return GetCompletionRatioInfo(target)
 	}
 
 	hardCodedRatio, locked := getHardcodedCompletionModelRatio(name)
@@ -608,6 +624,9 @@ func GetAudioRatio(name string) float64 {
 	if ratio, ok := audioRatioMap.Get(name); ok {
 		return ratio
 	}
+	if target, ok := price_alias.ResolveModelAlias(name); ok && target != name {
+		return GetAudioRatio(target)
+	}
 	return 1
 }
 
@@ -616,19 +635,32 @@ func GetAudioCompletionRatio(name string) float64 {
 	if ratio, ok := audioCompletionRatioMap.Get(name); ok {
 		return ratio
 	}
+	if target, ok := price_alias.ResolveModelAlias(name); ok && target != name {
+		return GetAudioCompletionRatio(target)
+	}
 	return 1
 }
 
 func ContainsAudioRatio(name string) bool {
 	name = FormatMatchingModelName(name)
-	_, ok := audioRatioMap.Get(name)
-	return ok
+	if _, ok := audioRatioMap.Get(name); ok {
+		return true
+	}
+	if target, ok := price_alias.ResolveModelAlias(name); ok && target != name {
+		return ContainsAudioRatio(target)
+	}
+	return false
 }
 
 func ContainsAudioCompletionRatio(name string) bool {
 	name = FormatMatchingModelName(name)
-	_, ok := audioCompletionRatioMap.Get(name)
-	return ok
+	if _, ok := audioCompletionRatioMap.Get(name); ok {
+		return true
+	}
+	if target, ok := price_alias.ResolveModelAlias(name); ok && target != name {
+		return ContainsAudioCompletionRatio(target)
+	}
+	return false
 }
 
 func ModelRatio2JSONString() string {
@@ -652,10 +684,13 @@ func UpdateImageRatioByJSONString(jsonStr string) error {
 
 func GetImageRatio(name string) (float64, bool) {
 	ratio, ok := imageRatioMap.Get(name)
-	if !ok {
-		return 1, false // Default to 1 if not found
+	if ok {
+		return ratio, true
 	}
-	return ratio, true
+	if target, resolved := price_alias.ResolveModelAlias(name); resolved && target != name {
+		return GetImageRatio(target)
+	}
+	return 1, false // Default to 1 if not found
 }
 
 func AudioRatio2JSONString() string {

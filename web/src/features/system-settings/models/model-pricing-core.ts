@@ -39,7 +39,7 @@ export type ModelPricingFormValues = z.infer<
   ReturnType<typeof createModelPricingSchema>
 >
 
-export type PricingMode = 'per-token' | 'per-request' | 'tiered_expr'
+export type PricingMode = 'per-token' | 'per-request' | 'tiered_expr' | 'alias'
 
 export type LaneKey =
   | 'completion'
@@ -62,6 +62,7 @@ export type ModelRatioData = {
   billingMode?: PricingMode
   billingExpr?: string
   requestRuleExpr?: string
+  pricingAlias?: string
 }
 
 export type PreviewRow = {
@@ -215,8 +216,20 @@ export function buildPreviewRows(
   promptPrice: string,
   lanePrices: Record<LaneKey, string>,
   laneEnabled: Record<LaneKey, boolean>,
+  pricingAlias: string,
   t: (key: string) => string
 ): PreviewRow[] {
+  if (mode === 'alias') {
+    return [
+      { key: 'mode', label: 'BillingMode', value: 'alias' },
+      {
+        key: 'aliasTarget',
+        label: t('Inherits pricing from'),
+        value: pricingAlias || t('Empty'),
+      },
+    ]
+  }
+
   if (mode === 'tiered_expr') {
     const effectiveExpr = combineBillingExpr(billingExpr, requestRuleExpr)
     return [

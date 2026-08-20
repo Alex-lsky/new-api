@@ -310,6 +310,7 @@ export function ModelMutateDrawer({
       ImageRatio: '',
       AudioRatio: '',
       AudioCompletionRatio: '',
+  ModelPricingAlias: '{}',
       ExposeRatioEnabled: false,
       'billing_setting.billing_mode': '{}',
       'billing_setting.billing_expr': '{}',

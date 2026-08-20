@@ -5,6 +5,7 @@ import (
 
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/price_alias"
 	"github.com/samber/lo"
 )
 
@@ -39,12 +40,21 @@ func GetBillingMode(model string) string {
 	if mode, ok := billingSetting.BillingMode[model]; ok {
 		return mode
 	}
+	if target, ok := price_alias.ResolveModelAlias(model); ok && target != model {
+		return GetBillingMode(target)
+	}
 	return BillingModeRatio
 }
 
 func GetBillingExpr(model string) (string, bool) {
 	expr, ok := billingSetting.BillingExpr[model]
-	return expr, ok
+	if ok {
+		return expr, true
+	}
+	if target, resolved := price_alias.ResolveModelAlias(model); resolved && target != model {
+		return GetBillingExpr(target)
+	}
+	return expr, false
 }
 
 func GetBillingModeCopy() map[string]string {

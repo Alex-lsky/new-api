@@ -56,6 +56,7 @@ type ModelFormValues = {
   ImageRatio: string
   AudioRatio: string
   AudioCompletionRatio: string
+  ModelPricingAlias: string
   ExposeRatioEnabled: boolean
   BillingMode: string
   BillingExpr: string
@@ -80,6 +81,7 @@ type ModelJsonFieldName =
   | 'ImageRatio'
   | 'AudioRatio'
   | 'AudioCompletionRatio'
+  | 'ModelPricingAlias'
 
 const modelJsonFields: Array<{
   name: ModelJsonFieldName
@@ -129,6 +131,12 @@ const modelJsonFields: Array<{
     name: 'AudioCompletionRatio',
     labelKey: 'Audio completion ratio',
     descriptionKey: 'Ratio applied to audio completions for streaming models.',
+  },
+  {
+    name: 'ModelPricingAlias',
+    labelKey: 'Model pricing alias',
+    descriptionKey:
+      'JSON map of model → priced model. Unset models inherit all pricing from the target model.',
   },
 ]
 
@@ -275,6 +283,7 @@ export const ModelRatioForm = memo(function ModelRatioForm({
               savedAudioCompletionRatio={savedValues.AudioCompletionRatio}
               savedBillingMode={savedValues.BillingMode}
               savedBillingExpr={savedValues.BillingExpr}
+              savedModelPricingAlias={savedValues.ModelPricingAlias}
               modelPrice={form.watch('ModelPrice')}
               modelRatio={form.watch('ModelRatio')}
               cacheRatio={form.watch('CacheRatio')}
@@ -285,6 +294,7 @@ export const ModelRatioForm = memo(function ModelRatioForm({
               audioCompletionRatio={form.watch('AudioCompletionRatio')}
               billingMode={form.watch('BillingMode')}
               billingExpr={form.watch('BillingExpr')}
+              modelPricingAlias={form.watch('ModelPricingAlias')}
               candidateModelNames={
                 isUnsetVariant ? enabledModelsQuery.data?.data : undefined
               }

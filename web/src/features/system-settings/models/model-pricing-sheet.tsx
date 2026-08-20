@@ -61,6 +61,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Combobox } from '@/components/ui/combobox'
 import { cn } from '@/lib/utils'
 
 import {
@@ -80,6 +81,7 @@ import {
   type PricingMode,
 } from './model-pricing-core'
 import { PriceInput, PriceLane } from './model-pricing-inputs'
+import { findContainmentMatch } from './price-alias'
 import { formatPricingNumber } from './pricing-format'
 import { TieredPricingEditor } from './tiered-pricing-editor'
 
@@ -89,6 +91,7 @@ type ModelPricingSheetProps = {
   open: boolean
   onOpenChange: (open: boolean) => void
   editData?: ModelRatioData | null
+  pricedModelNames?: string[]
   onSave?: () => void | Promise<void>
   isSaving?: boolean
 }
@@ -108,7 +111,7 @@ export const ModelPricingSheet = forwardRef<
   ModelPricingEditorPanelHandle,
   ModelPricingSheetProps
 >(function ModelPricingSheet(
-  { open, onOpenChange, editData, onSave, isSaving },
+  { open, onOpenChange, editData, pricedModelNames, onSave, isSaving },
   ref
 ) {
   const { t } = useTranslation()
@@ -128,6 +131,7 @@ export const ModelPricingSheet = forwardRef<
         <ModelPricingEditorPanel
           ref={ref}
           editData={editData}
+          pricedModelNames={pricedModelNames}
           onSave={onSave}
           isSaving={isSaving}
           className='h-full rounded-none border-0'
@@ -141,7 +145,7 @@ export const ModelPricingEditorPanel = forwardRef<
   ModelPricingEditorPanelHandle,
   ModelPricingEditorPanelProps
 >(function ModelPricingEditorPanel(
-  { editData, className, onSave, isSaving },
+  { editData, pricedModelNames, className, onSave, isSaving },
   ref
 ) {
   const { t } = useTranslation()
@@ -155,6 +159,7 @@ export const ModelPricingEditorPanel = forwardRef<
   })
   const [billingExpr, setBillingExpr] = useState('')
   const [requestRuleExpr, setRequestRuleExpr] = useState('')
+  const [aliasTarget, setAliasTarget] = useState('')
   const [editorReloadToken, setEditorReloadToken] = useState(0)
   const isEditMode = !!editData
 
@@ -188,15 +193,18 @@ export const ModelPricingEditorPanel = forwardRef<
         audioRatio: editData.audioRatio || '',
         audioCompletionRatio: editData.audioCompletionRatio || '',
       })
-      setPricingMode(
-        editData.billingMode === 'tiered_expr'
-          ? 'tiered_expr'
-          : editData.price
-            ? 'per-request'
-            : 'per-token'
-      )
+      if (editData.billingMode === 'tiered_expr') {
+        setPricingMode('tiered_expr')
+      } else if (editData.billingMode === 'alias' || editData.pricingAlias) {
+        setPricingMode('alias')
+      } else if (editData.price) {
+        setPricingMode('per-request')
+      } else {
+        setPricingMode('per-token')
+      }
       setBillingExpr(editData.billingExpr || '')
       setRequestRuleExpr(editData.requestRuleExpr || '')
+      setAliasTarget(editData.pricingAlias || '')
     } else {
       form.reset({
         name: '',
@@ -212,6 +220,7 @@ export const ModelPricingEditorPanel = forwardRef<
       setPricingMode('per-token')
       setBillingExpr('')
       setRequestRuleExpr('')
+      setAliasTarget('')
     }
 
     setPromptPrice(nextLaneState.promptPrice)
@@ -341,6 +350,18 @@ export const ModelPricingEditorPanel = forwardRef<
   }
 
   const watchedValues = form.watch()
+  const aliasTargetOptions = useMemo(() => {
+    const modelName = watchedValues.name.trim()
+    const candidates = (pricedModelNames ?? []).filter(
+      (name) => name && name !== modelName
+    )
+    const suggested = findContainmentMatch(modelName, candidates)
+    const sorted = [...candidates].sort((a, b) => a.localeCompare(b))
+    if (suggested) {
+      return [suggested, ...sorted.filter((name) => name !== suggested)]
+    }
+    return sorted
+  }, [pricedModelNames, watchedValues.name])
   const previewRows = useMemo(
     () =>
       buildPreviewRows(
@@ -351,9 +372,11 @@ export const ModelPricingEditorPanel = forwardRef<
         promptPrice,
         lanePrices,
         laneEnabled,
+        aliasTarget,
         t
       ),
     [
+      aliasTarget,
       billingExpr,
       laneEnabled,
       lanePrices,
@@ -411,6 +434,14 @@ export const ModelPricingEditorPanel = forwardRef<
   }, [editData, laneEnabled, lanePrices, pricingMode, promptPrice, t])
 
   const validatePricingValues = useCallback(() => {
+    if (pricingMode === 'alias') {
+      const trimmedTarget = aliasTarget.trim()
+      if (!trimmedTarget || trimmedTarget === form.getValues('name').trim()) {
+        return false
+      }
+      return true
+    }
+
     if (
       pricingMode === 'per-token' &&
       toNumberOrNull(promptPrice) === null &&
@@ -436,7 +467,7 @@ export const ModelPricingEditorPanel = forwardRef<
     }
 
     return true
-  }, [form, laneEnabled, lanePrices, pricingMode, promptPrice, t])
+  }, [aliasTarget, form, laneEnabled, lanePrices, pricingMode, promptPrice, t])
 
   const buildSubmitData = useCallback(
     (values: ModelPricingFormValues) => {
@@ -458,9 +489,13 @@ export const ModelPricingEditorPanel = forwardRef<
         data.requestRuleExpr = requestRuleExpr
       }
 
+      if (pricingMode === 'alias') {
+        data.pricingAlias = aliasTarget.trim()
+      }
+
       return data
     },
-    [billingExpr, pricingMode, requestRuleExpr]
+    [aliasTarget, billingExpr, pricingMode, requestRuleExpr]
   )
 
   useImperativeHandle(
@@ -544,7 +579,7 @@ export const ModelPricingEditorPanel = forwardRef<
                   onValueChange={handleModeChange}
                   className='gap-4'
                 >
-                  <TabsList className='grid w-full grid-cols-3'>
+                  <TabsList className='grid w-full grid-cols-4'>
                     <TabsTrigger value='per-token'>
                       {t('Per-token')}
                     </TabsTrigger>
@@ -554,6 +589,7 @@ export const ModelPricingEditorPanel = forwardRef<
                     <TabsTrigger value='tiered_expr'>
                       {t('Expression')}
                     </TabsTrigger>
+                    <TabsTrigger value='alias'>{t('Alias')}</TabsTrigger>
                   </TabsList>
 
                   <TabsContent value='per-token' className='pt-0'>
@@ -649,6 +685,39 @@ export const ModelPricingEditorPanel = forwardRef<
                         onBillingExprChange={setBillingExpr}
                         onRequestRuleExprChange={setRequestRuleExpr}
                       />
+                    </FieldGroup>
+                  </TabsContent>
+
+                  <TabsContent value='alias' className='pt-0'>
+                    <FieldGroup className='gap-5'>
+                      <Field>
+                        <FieldLabel>
+                          {t('Inherits pricing from')}
+                        </FieldLabel>
+                        <Combobox
+                          value={aliasTarget || undefined}
+                          onValueChange={(value) => setAliasTarget(value ?? '')}
+                          options={aliasTargetOptions.map((name) => ({
+                            label: name,
+                            value: name,
+                          }))}
+                          searchPlaceholder={t('Search models...')}
+                          emptyText={t('No priced models available')}
+                          placeholder={t('Select a priced model')}
+                        />
+                        <FieldDescription>
+                          {t(
+                            'This model inherits all pricing from the selected model. Direct pricing settings are removed.'
+                          )}
+                        </FieldDescription>
+                        {pricingMode === 'alias' &&
+                          !aliasTarget.trim() &&
+                          watchedValues.name && (
+                            <p className='text-warning text-xs'>
+                              {t('Select a priced model to inherit from.')}
+                            </p>
+                          )}
+                      </Field>
                     </FieldGroup>
                   </TabsContent>
                 </Tabs>

@@ -92,6 +92,15 @@ export function buildModelRatioColumns({
               className='shrink-0'
             />
           )}
+          {row.original.pricingAlias && (
+            <StatusBadge
+              label={t('Alias')}
+              variant='neutral'
+              copyable={false}
+              copyText={row.original.pricingAlias}
+              className='shrink-0'
+            />
+          )}
           {row.original.hasConflict && (
             <StatusBadge
               label={t('Conflict')}

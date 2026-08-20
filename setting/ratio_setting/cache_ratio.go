@@ -1,6 +1,7 @@
 package ratio_setting
 
 import (
+	"github.com/QuantumNous/new-api/setting/price_alias"
 	"github.com/QuantumNous/new-api/types"
 )
 
@@ -158,18 +159,24 @@ func UpdateCreateCacheRatioByJSONString(jsonStr string) error {
 // GetCacheRatio returns the cache ratio for a model
 func GetCacheRatio(name string) (float64, bool) {
 	ratio, ok := cacheRatioMap.Get(name)
-	if !ok {
-		return 1, false // Default to 1 if not found
+	if ok {
+		return ratio, true
 	}
-	return ratio, true
+	if target, resolved := price_alias.ResolveModelAlias(name); resolved && target != name {
+		return GetCacheRatio(target)
+	}
+	return 1, false // Default to 1 if not found
 }
 
 func GetCreateCacheRatio(name string) (float64, bool) {
 	ratio, ok := createCacheRatioMap.Get(name)
-	if !ok {
-		return 1.25, false // Default to 1.25 if not found
+	if ok {
+		return ratio, true
 	}
-	return ratio, true
+	if target, resolved := price_alias.ResolveModelAlias(name); resolved && target != name {
+		return GetCreateCacheRatio(target)
+	}
+	return 1.25, false // Default to 1.25 if not found
 }
 
 func GetCacheRatioCopy() map[string]float64 {

@@ -11,8 +11,10 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/price_alias"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -271,4 +273,18 @@ func TestModelPriceHelperRequestBillingRatiosOnlyApplyToFixedPrice(t *testing.T)
 	require.Equal(t, "QuotaFromFloat", clamp.Op)
 	require.Equal(t, common.QuotaClampOverflow, clamp.Kind)
 	require.Nil(t, info.Billing)
+}
+
+func TestHasModelBillingConfigAliasFallback(t *testing.T) {
+	savedRatio := ratio_setting.ModelRatio2JSONString()
+	savedAlias := price_alias.PriceAlias2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(savedRatio))
+		require.NoError(t, price_alias.UpdatePriceAliasByJSONString(savedAlias))
+	})
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"alias-has-billing-config-src":1}`))
+	require.NoError(t, price_alias.UpdatePriceAliasByJSONString(`{"Alias Has Billing Config":"alias-has-billing-config-src"}`))
+
+	assert.True(t, HasModelBillingConfig("Alias Has Billing Config"))
+	assert.False(t, HasModelBillingConfig("no-such-model-anywhere"))
 }
