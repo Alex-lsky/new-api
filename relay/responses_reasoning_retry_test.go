@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -35,6 +37,14 @@ func TestStripResponsesInputReasoning(t *testing.T) {
 	assert.Equal(t, []string{"message"}, gjsonGetArray(stripResponsesInputReasoning(mixed), "input"))
 }
 
+func testGinCtx() *gin.Context {
+	gin.SetMode(gin.TestMode)
+	rc := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rc)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	return ctx
+}
+
 func TestResponsesRetryDoRequestStaleReasoning(t *testing.T) {
 	marked := `{"error":{"message":"Referenced reasoning item 'rs_x' was not found or has expired.","type":"invalid_request_error"}}`
 	okBody := `{"id":"r1","output":[],"status":"completed"}`
@@ -51,7 +61,7 @@ func TestResponsesRetryDoRequestStaleReasoning(t *testing.T) {
 			}
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(okBody))}, nil
 		}
-		wrapped := responsesRetryDoRequest(doRequest)
+		wrapped := responsesRetryDoRequest(testGinCtx(), doRequest)
 		respAny, err := wrapped(bytes.NewReader([]byte(`{"input":[{"type":"message","content":[]},{"type":"reasoning","id":"rs_x"}],"model":"m"}`)))
 		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, respAny.(*http.Response).StatusCode)
@@ -67,7 +77,7 @@ func TestResponsesRetryDoRequestStaleReasoning(t *testing.T) {
 			attempt++
 			return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(strings.NewReader(unrelated))}, nil
 		}
-		wrapped := responsesRetryDoRequest(doRequest)
+		wrapped := responsesRetryDoRequest(testGinCtx(), doRequest)
 		respAny, err := wrapped(bytes.NewReader([]byte(`{"input":[{"type":"reasoning","id":"rs_x"}],"model":"m"}`)))
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusBadRequest, respAny.(*http.Response).StatusCode)
@@ -82,7 +92,7 @@ func TestResponsesRetryDoRequestStaleReasoning(t *testing.T) {
 			attempt++
 			return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(strings.NewReader(marked))}, nil
 		}
-		wrapped := responsesRetryDoRequest(doRequest)
+		wrapped := responsesRetryDoRequest(testGinCtx(), doRequest)
 		respAny, err := wrapped(bytes.NewReader([]byte(`{"input":"plain string","model":"m"}`)))
 		require.NoError(t, err)
 		require.Equal(t, 1, attempt, "no pointless retry")
@@ -95,7 +105,7 @@ func TestResponsesRetryDoRequestStaleReasoning(t *testing.T) {
 			attempt++
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(okBody))}, nil
 		}
-		wrapped := responsesRetryDoRequest(doRequest)
+		wrapped := responsesRetryDoRequest(testGinCtx(), doRequest)
 		respAny, err := wrapped(bytes.NewReader([]byte(`{"input":[],"model":"m"}`)))
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusOK, respAny.(*http.Response).StatusCode)

@@ -196,7 +196,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		// gateway-executed hosted tools: iterate upstream rounds, execute the
 		// tool calls in between, and only the final round reaches the client
 		usage, loopErr := runResponsesEmulationLoop(c, info,
-			responsesRetryDoRequest(func(body io.Reader) (any, error) {
+			responsesRetryDoRequest(c, func(body io.Reader) (any, error) {
 				return adaptor.DoRequest(c, info, body)
 			}),
 			func(roundResp *http.Response) (*dto.Usage, *types.NewAPIError) {
@@ -217,7 +217,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		}
 		usageDto = usage
 	} else {
-		resp, err := responsesRetryDoRequest(func(body io.Reader) (any, error) {
+		resp, err := responsesRetryDoRequest(c, func(body io.Reader) (any, error) {
 			return adaptor.DoRequest(c, info, body)
 		})(requestBody)
 		if err != nil {

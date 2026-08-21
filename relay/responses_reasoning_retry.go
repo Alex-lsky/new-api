@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -61,7 +63,7 @@ func stripResponsesInputReasoning(body []byte) []byte {
 // stale reasoning reference is retried once with the client's reasoning items
 // stripped from the input. Any other response is returned untouched (a rejected
 // 400 body is re-buffered so the regular error path can still read it).
-func responsesRetryDoRequest(doRequest func(io.Reader) (any, error)) func(io.Reader) (any, error) {
+func responsesRetryDoRequest(c *gin.Context, doRequest func(io.Reader) (any, error)) func(io.Reader) (any, error) {
 	return func(initial io.Reader) (any, error) {
 		raw, err := io.ReadAll(initial)
 		if err != nil {
@@ -89,6 +91,7 @@ func responsesRetryDoRequest(doRequest func(io.Reader) (any, error)) func(io.Rea
 		if bytes.Equal(sanitized, raw) {
 			return httpResp, nil
 		}
+		logger.LogWarn(c, "upstream rejected referenced reasoning item, retrying without client reasoning input")
 		outbound, closer, err := relaycommon.NewOutboundJSONBody(sanitized)
 		if err != nil {
 			return nil, fmt.Errorf("rebuild request for reasoning retry: %w", err)
