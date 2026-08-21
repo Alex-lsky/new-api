@@ -196,9 +196,9 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		// gateway-executed hosted tools: iterate upstream rounds, execute the
 		// tool calls in between, and only the final round reaches the client
 		usage, loopErr := runResponsesEmulationLoop(c, info,
-			func(body io.Reader) (any, error) {
+			responsesRetryDoRequest(func(body io.Reader) (any, error) {
 				return adaptor.DoRequest(c, info, body)
-			},
+			}),
 			func(roundResp *http.Response) (*dto.Usage, *types.NewAPIError) {
 				usageAny, apiErr := adaptor.DoResponse(c, roundResp, info)
 				if apiErr != nil {
@@ -217,7 +217,9 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		}
 		usageDto = usage
 	} else {
-		resp, err := adaptor.DoRequest(c, info, requestBody)
+		resp, err := responsesRetryDoRequest(func(body io.Reader) (any, error) {
+			return adaptor.DoRequest(c, info, body)
+		})(requestBody)
 		if err != nil {
 			return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 		}
