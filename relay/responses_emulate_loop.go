@@ -306,11 +306,11 @@ func rewriteEmulatedToolChoice(body []byte, searchEmulated bool, imageEmulated b
 	return result
 }
 
-// rewriteEmulatedToolHistory turns native web_search_call and
-// image_generation_call history items into the function form the upstream
-// expects. An image call expands into a function_call plus a marker
-// function_call_output so the upstream never sees an unpaired call. Returns
-// the rebuilt items and whether anything changed.
+// rewriteEmulatedToolHistory turns native web_search_call,
+// image_generation_call and image_recognition_call history items into the
+// function form the upstream expects. Every hosted call expands into a
+// function_call plus a marker function_call_output so the upstream never sees
+// an unpaired call. Returns the rebuilt items and whether anything changed.
 func rewriteEmulatedToolHistory(input gjson.Result, emulateSet map[string]struct{}) ([][]byte, bool) {
 	if !input.IsArray() {
 		return nil, false
@@ -339,6 +339,13 @@ func rewriteEmulatedToolHistory(input gjson.Result, emulateSet map[string]struct
 				"arguments": string(arguments),
 			}); replacement != nil {
 				rewritten = append(rewritten, replacement)
+				if output := marshaledTool(map[string]any{
+					"type":    "function_call_output",
+					"call_id": callID,
+					"output":  "web search already performed and its results already delivered to the user",
+				}); output != nil {
+					rewritten = append(rewritten, output)
+				}
 				changed = true
 				continue
 			}

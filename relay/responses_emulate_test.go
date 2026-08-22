@@ -92,7 +92,9 @@ func TestEmulateResponsesHostedToolsHistory(t *testing.T) {
 	assert.Equal(t, "function_call", gjson.GetBytes(out, "input.1.type").String())
 	assert.Equal(t, "web_search", gjson.GetBytes(out, "input.1.name").String())
 	assert.Equal(t, `{"query":"go news"}`, gjson.GetBytes(out, "input.1.arguments").String())
-	assert.Equal(t, "message", gjson.GetBytes(out, "input.2.type").String(), "unrelated history items untouched")
+	assert.Equal(t, "function_call_output", gjson.GetBytes(out, "input.2.type").String(), "hosted call must be paired so the upstream never rejects a bare function_call")
+	assert.Equal(t, "ws_1", gjson.GetBytes(out, "input.2.call_id").String())
+	assert.Equal(t, "message", gjson.GetBytes(out, "input.3.type").String(), "unrelated history items untouched")
 }
 
 func TestEmulateResponsesHostedToolsNoChange(t *testing.T) {
