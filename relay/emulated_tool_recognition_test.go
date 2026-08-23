@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -59,7 +60,7 @@ func TestExecuteEmulatedImageRecognitionGemini(t *testing.T) {
 
 	result := executeEmulatedImageRecognition(t.Context(), `{"question":"what animal","image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{
 		Provider: dto.EmulatedRecognitionProviderGemini, APIKey: "k", APIBase: server.URL,
-	}, nil, "")
+	}, nil, nil)
 	assert.True(t, dataURLBody, "inline image sent")
 	assert.Equal(t, "A cat.", result.Output)
 	assert.Equal(t, "A cat.", result.Summary)
@@ -82,7 +83,7 @@ func TestExecuteEmulatedImageRecognitionOpenAIVision(t *testing.T) {
 
 	result := executeEmulatedImageRecognition(t.Context(), `{"question":"what is this","image_url":"https://example.com/pic.png"}`, &dto.EmulatedToolBackend{
 		Provider: dto.EmulatedRecognitionProviderOpenAI, APIKey: "vk", APIBase: server.URL,
-	}, nil, "")
+	}, nil, nil)
 	assert.Equal(t, "https://example.com/pic.png", gotURL)
 	assert.Equal(t, "A dog running.", result.Output)
 }
@@ -95,19 +96,19 @@ func TestExecuteEmulatedImageRecognitionFallsBackToInputImage(t *testing.T) {
 	body := []byte(`{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"},{"type":"input_image","image_url":"https://cdn.example/photo1.jpg","detail":"high"}]},{"type":"message","role":"user","content":[{"type":"input_image","image_url":"https://cdn.example/photo2.jpg"}]}]}`)
 	result := executeEmulatedImageRecognition(t.Context(), `{"question":"what is shown"}`, &dto.EmulatedToolBackend{
 		Provider: dto.EmulatedRecognitionProviderOpenAI, APIKey: "k", APIBase: server.URL,
-	}, body, "")
+	}, body, nil)
 	assert.Equal(t, "It is a mountain.", result.Output)
 	assert.Equal(t, "https://cdn.example/photo2.jpg", lastInputImageFromBody(body), "most recent input_image selected")
 }
 
 func TestExecuteEmulatedImageRecognitionErrors(t *testing.T) {
-	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"question":"q"}`, nil, nil, "").Output, "not configured")
-	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"question":"q"}`, &dto.EmulatedToolBackend{Provider: dto.EmulatedRecognitionProviderOpenAI, APIKey: "k"}, nil, "").Output, "no image", "no image in call or request")
-	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{Provider: "nope", APIKey: "k"}, nil, "").Output, "unsupported provider")
+	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"question":"q"}`, nil, nil, nil).Output, "not configured")
+	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"question":"q"}`, &dto.EmulatedToolBackend{Provider: dto.EmulatedRecognitionProviderOpenAI, APIKey: "k"}, nil, nil).Output, "no image", "no image in call or request")
+	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{Provider: "nope", APIKey: "k"}, nil, nil).Output, "unsupported provider")
 	// a channel reference without a channel id must degrade to text, never a
 	// default-endpoint network call
-	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{Provider: dto.EmulatedChannelProvider}, nil, "").Output, "failed")
-	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{Provider: dto.EmulatedChannelProvider, ChannelID: 0, Executor: "gemini"}, nil, "").Output, "failed")
+	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{Provider: dto.EmulatedChannelProvider}, nil, nil).Output, "failed")
+	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{Provider: dto.EmulatedChannelProvider, ChannelID: 0, Executor: "gemini"}, nil, nil).Output, "failed")
 }
 
 func TestImageForVisionRemoteDownloadAndMime(t *testing.T) {
@@ -187,7 +188,7 @@ func TestExecuteEmulatedImageRecognitionCodePlanMCP(t *testing.T) {
 	result := executeEmulatedImageRecognition(t.Context(), `{"question":"describe image","image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{
 		Provider: dto.EmulatedRecognitionProviderZhipuCodePlanVisionMCP,
 		APIKey:   "vision-key",
-	}, nil, "")
+	}, nil, nil)
 	assert.Equal(t, "vision result", result.Output)
 	assert.Equal(t, "vision result", result.Summary)
 }
@@ -284,4 +285,30 @@ func TestResolveEmulatedToolRefs(t *testing.T) {
 		dto.EmulatedToolTypeImage:     {Ref: "g-search"},
 	})
 	require.Nil(t, dropped)
+}
+
+func TestExecuteEmulatedImageRecognitionAttachmentRefs(t *testing.T) {
+	var gotURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 8192)
+		n, _ := r.Body.Read(buf)
+		gotURL = extractImageURLFromBody(string(buf[:n]))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"A red square."}}]}`))
+	}))
+	defer server.Close()
+	backend := &dto.EmulatedToolBackend{Provider: dto.EmulatedRecognitionProviderOpenAI, APIKey: "k", APIBase: server.URL}
+	bridge := relaycommon.NewResponsesClientToolBridge()
+	bridge.AddAttachment("data:image/png;base64,AAA")
+	bridge.AddAttachment("https://cdn.example/second.png")
+
+	result := executeEmulatedImageRecognition(t.Context(), `{"question":"q","image_url":"attachment://2"}`, backend, nil, bridge)
+	assert.Equal(t, "https://cdn.example/second.png", gotURL, "reference resolves to the second attachment")
+	assert.Equal(t, "A red square.", result.Output)
+
+	result = executeEmulatedImageRecognition(t.Context(), `{"question":"q"}`, backend, nil, bridge)
+	assert.Equal(t, "https://cdn.example/second.png", gotURL, "no-arg fallback analyzes the most recent attachment")
+	assert.Equal(t, "https://cdn.example/second.png", bridge.LastAttachedImageURL(), "last attachment wins for the fallback")
+
+	result = executeEmulatedImageRecognition(t.Context(), `{"question":"q","image_url":"attachment://9"}`, backend, nil, bridge)
+	assert.Contains(t, result.Output, "unknown attachment reference", "hallucinated refs get a corrective error")
 }

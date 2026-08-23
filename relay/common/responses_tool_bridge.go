@@ -1,6 +1,9 @@
 package common
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // ResponsesClientToolKind identifies which native Responses tool kind a
 // bridged function tool stands in for.
@@ -46,17 +49,60 @@ type ResponsesClientToolSpec struct {
 	Namespace string
 }
 
+// ResponsesAttachment pairs a per-request image reference ("attachment://3")
+// with the original image URL or data URL it stands in for.
+type ResponsesAttachment struct {
+	Ref string
+	URL string
+}
+
+// AttachmentURLPrefix marks a per-request stripped-image reference passed by
+// the model inside an image_recognition tool call.
+const AttachmentURLPrefix = "attachment://"
+
 // ResponsesClientToolBridge is a request-scoped registry populated while the
 // outbound Responses request is rewritten (client tool kinds → function tools)
 // and consulted while the upstream response is restored (function calls →
 // native tool call items). A request that bridged nothing leaves it nil.
 type ResponsesClientToolBridge struct {
 	byChatName map[string]ResponsesClientToolSpec
-	// AttachedImage holds the most recent user input_image URL captured before
-	// input_image parts were stripped for a recognition-emulating channel; the
-	// recognition executor uses it when the model calls the tool without an
-	// image_url of its own.
-	AttachedImage string
+	// AttachedImages records, in input order, every user input_image stripped
+	// for a recognition-emulating channel, so the executor can resolve the
+	// attachment:// references the strip markers hand the model.
+	AttachedImages []ResponsesAttachment
+}
+
+// AddAttachment records a stripped image and returns its reference.
+func (b *ResponsesClientToolBridge) AddAttachment(url string) string {
+	if b == nil {
+		return ""
+	}
+	b.AttachedImages = append(b.AttachedImages, ResponsesAttachment{Ref: strconv.Itoa(len(b.AttachedImages) + 1), URL: url})
+	return AttachmentURLPrefix + b.AttachedImages[len(b.AttachedImages)-1].Ref
+}
+
+// ResolveAttachmentURL maps an attachment:// reference back to the original
+// image URL; anything else (or an unknown reference) yields "".
+func (b *ResponsesClientToolBridge) ResolveAttachmentURL(imageURL string) string {
+	if b == nil || !strings.HasPrefix(imageURL, AttachmentURLPrefix) {
+		return ""
+	}
+	ref := strings.TrimPrefix(imageURL, AttachmentURLPrefix)
+	for _, attachment := range b.AttachedImages {
+		if attachment.Ref == ref {
+			return attachment.URL
+		}
+	}
+	return ""
+}
+
+// LastAttachedImageURL returns the most recent stripped image, used when the
+// model calls image_recognition without an image_url of its own.
+func (b *ResponsesClientToolBridge) LastAttachedImageURL() string {
+	if b == nil || len(b.AttachedImages) == 0 {
+		return ""
+	}
+	return b.AttachedImages[len(b.AttachedImages)-1].URL
 }
 
 func NewResponsesClientToolBridge() *ResponsesClientToolBridge {

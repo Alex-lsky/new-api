@@ -609,8 +609,11 @@ func TestEmulateResponsesHostedToolsStripsInputImages(t *testing.T) {
 
 	assert.NotContains(t, string(out), "input_image", "image parts never reach the upstream")
 	assert.NotContains(t, string(out), "cdn.example", "image URLs stripped along with the parts")
-	assert.Contains(t, string(out), recognitionStripMarker, "marker tells the model how to see the image")
-	assert.Equal(t, "https://cdn.example/b.png", bridge.AttachedImage, "most recent image kept for the executor")
+	assert.Contains(t, string(out), "Image 2 of 2 attached but not visible", "marker names the attachment reference")
+	assert.Contains(t, string(out), `attachment://1`, "first image gets a reference")
+	assert.Equal(t, "https://cdn.example/b.png", bridge.LastAttachedImageURL(), "most recent image kept for the executor")
+	assert.Equal(t, "https://cdn.example/a.png", bridge.ResolveAttachmentURL("attachment://1"), "references resolve to the originals")
+	assert.Equal(t, "https://cdn.example/b.png", bridge.ResolveAttachmentURL("attachment://2"), "object-form image_url registered too")
 	assert.Equal(t, "function", gjson.GetBytes(out, `tools.#(name=="image_recognition").type`).String(), "recognition tool injected")
 	assert.Equal(t, "input_text", gjson.GetBytes(out, "input.0.content.0.type").String(), "bare input_image item becomes a message")
 }

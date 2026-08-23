@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/tidwall/gjson"
@@ -68,11 +69,12 @@ type emulatedRecognitionResult struct {
 }
 
 // executeEmulatedImageRecognition analyzes an image with the configured vision
-// backend. When the model call does not include an image_url, the gateway uses
-// the most recent user input_image in the request (so text-only upstreams like
-// opencode zen can read images the user attached); when those parts were
-// stripped for this channel the pre-strip image is passed as fallbackImage.
-func executeEmulatedImageRecognition(ctx context.Context, arguments string, backend *dto.EmulatedToolBackend, requestBody []byte, fallbackImage string) emulatedRecognitionResult {
+// backend. The model passes either a real URL / data URL or an attachment://N
+// reference (resolved via the request's bridge against the input_image parts
+// stripped for this channel); when it omits image_url, the gateway falls back
+// to the most recent user input_image, first from the request body and then
+// from the stripped attachments.
+func executeEmulatedImageRecognition(ctx context.Context, arguments string, backend *dto.EmulatedToolBackend, requestBody []byte, bridge *relaycommon.ResponsesClientToolBridge) emulatedRecognitionResult {
 	if backend == nil {
 		return emulatedRecognitionResult{Output: "image recognition is not configured on this channel"}
 	}
@@ -81,11 +83,15 @@ func executeEmulatedImageRecognition(ctx context.Context, arguments string, back
 	if imageURL == "" {
 		imageURL = lastInputImageFromBody(requestBody)
 		if imageURL == "" {
-			imageURL = fallbackImage
+			imageURL = bridge.LastAttachedImageURL()
 		}
 		if imageURL == "" {
 			return emulatedRecognitionResult{Output: "image recognition failed: no image provided in the call or the request"}
 		}
+	} else if resolved := bridge.ResolveAttachmentURL(imageURL); resolved != "" {
+		imageURL = resolved
+	} else if strings.HasPrefix(imageURL, relaycommon.AttachmentURLPrefix) {
+		return emulatedRecognitionResult{Output: "image recognition failed: unknown attachment reference " + imageURL + "; pass one of the attachment://N references listed in the conversation"}
 	}
 	question := args.Question
 	if question == "" {
