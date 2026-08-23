@@ -101,6 +101,17 @@ func emulateResponsesHostedTools(body []byte, emulateSet map[string]struct{}, br
 	tools := gjson.GetBytes(body, "tools")
 	rewrittenInput, inputChanged := rewriteEmulatedToolHistory(gjson.GetBytes(body, "input"), emulateSet)
 	_, recognitionEmulated := emulateSet["image_recognition"]
+	if recognitionEmulated {
+		// the upstream must never see input_image parts (text-only or
+		// vision-flaky upstreams reject the whole request), so remember the
+		// last image for the executor and replace the parts with a marker
+		if image := lastInputImageFromBody(body); image != "" && bridge != nil {
+			bridge.AttachedImage = image
+		}
+		var stripped bool
+		rewrittenInput, stripped = stripRecognitionImages(rewrittenInput)
+		inputChanged = inputChanged || stripped
+	}
 	if !tools.IsArray() && !inputChanged && !recognitionEmulated {
 		return body
 	}
@@ -409,6 +420,69 @@ func rewriteEmulatedToolHistory(input gjson.Result, emulateSet map[string]struct
 	return rewritten, changed
 }
 
+// recognitionStripMarker replaces every stripped input_image part so the model
+// still knows an image was attached and how to inspect it. When several images
+// are attached the no-argument fallback only reaches the most recent one.
+const recognitionStripMarker = "[An image was attached here but is not visible to you. Call the image_recognition tool without an image_url argument to get its description.]"
+
+// stripRecognitionImages replaces input_image items and message content parts
+// with a text marker so a recognition-emulating channel never forwards image
+// payloads upstream. Returns the rebuilt items and whether anything changed.
+func stripRecognitionImages(items [][]byte) ([][]byte, bool) {
+	if len(items) == 0 {
+		return items, false
+	}
+	changed := false
+	for i, raw := range items {
+		item := gjson.ParseBytes(raw)
+		switch strings.ToLower(strings.TrimSpace(item.Get("type").String())) {
+		case "input_image":
+			if marker := marshaledTool(map[string]any{
+				"type": "message", "role": "user",
+				"content": []any{map[string]any{"type": "input_text", "text": recognitionStripMarker}},
+			}); marker != nil {
+				items[i] = marker
+				changed = true
+			}
+		case "message":
+			content := item.Get("content")
+			if !content.IsArray() {
+				continue
+			}
+			parts := content.Array()
+			rebuilt := make([][]byte, 0, len(parts))
+			partChanged := false
+			for _, part := range parts {
+				if strings.ToLower(strings.TrimSpace(part.Get("type").String())) == "input_image" {
+					if marker := marshaledTool(map[string]any{"type": "input_text", "text": recognitionStripMarker}); marker != nil {
+						rebuilt = append(rebuilt, marker)
+						partChanged = true
+						continue
+					}
+				}
+				rebuilt = append(rebuilt, []byte(part.Raw))
+			}
+			if !partChanged {
+				continue
+			}
+			var joined strings.Builder
+			joined.WriteByte('[')
+			for j, part := range rebuilt {
+				if j > 0 {
+					joined.WriteByte(',')
+				}
+				joined.Write(part)
+			}
+			joined.WriteByte(']')
+			if updated, err := sjson.SetRawBytes(raw, "content", []byte(joined.String())); err == nil {
+				items[i] = updated
+				changed = true
+			}
+		}
+	}
+	return items, changed
+}
+
 // recognitionArgsFromHistoryItem best-effort extracts the arguments of a
 // client-echoed image_recognition_call item.
 func recognitionArgsFromHistoryItem(item gjson.Result) map[string]any {
@@ -509,7 +583,11 @@ func runResponsesEmulationLoop(c *gin.Context, info *relaycommon.RelayInfo, doRe
 		}
 		executed = append(executed, calls...)
 
-		next, executedCalls, err := appendEmulatedToolResults(body, calls, captured.buf.Bytes(), backends, c)
+		attachedImage := ""
+		if info.ClientToolBridge != nil {
+			attachedImage = info.ClientToolBridge.AttachedImage
+		}
+		next, executedCalls, err := appendEmulatedToolResults(body, calls, captured.buf.Bytes(), backends, c, attachedImage)
 		if err != nil {
 			return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
@@ -525,7 +603,7 @@ func runResponsesEmulationLoop(c *gin.Context, info *relaycommon.RelayInfo, doRe
 // extends the request input with the model's calls (plus its reasoning items,
 // mirroring what a native client echoes back) and the tool results. Calls are
 // executed in place; the mutated slice is returned for the final restore.
-func appendEmulatedToolResults(body []byte, calls []emulatedToolCall, captured []byte, backends map[string]*dto.EmulatedToolBackend, c *gin.Context) ([]byte, []emulatedToolCall, error) {
+func appendEmulatedToolResults(body []byte, calls []emulatedToolCall, captured []byte, backends map[string]*dto.EmulatedToolBackend, c *gin.Context, attachedImage string) ([]byte, []emulatedToolCall, error) {
 	appended := reasoningItemsFromCaptured(captured)
 	for i := range calls {
 		call := &calls[i]
@@ -536,7 +614,7 @@ func appendEmulatedToolResults(body []byte, calls []emulatedToolCall, captured [
 			call.ImageB64 = result.ImageB64
 			logger.LogDebug(c, "emulated image_generation %q -> %.200s", emulatedImagePrompt(call.Arguments), result.Output)
 		case relaycommon.ResponsesClientToolImageRecognition:
-			result := executeEmulatedImageRecognition(c.Request.Context(), call.Arguments, backends[dto.EmulatedToolTypeRecognition], body)
+			result := executeEmulatedImageRecognition(c.Request.Context(), call.Arguments, backends[dto.EmulatedToolTypeRecognition], body, attachedImage)
 			call.Result = result.Output
 			call.Summary = result.Summary
 			logger.LogDebug(c, "emulated image_recognition %s -> %.200s", call.Arguments, result.Output)
@@ -736,6 +814,11 @@ func forEachCapturedOutputItem(captured []byte, fn func(item gjson.Result)) {
 }
 
 func isLikelySSE(data []byte) bool {
+	// a JSON body always wins: tool-call arguments can embed "data:" URLs
+	// (data:image/png;base64,...) which must not be mistaken for SSE frames
+	if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '{' {
+		return false
+	}
 	return bytes.Contains(data, []byte("data:"))
 }
 

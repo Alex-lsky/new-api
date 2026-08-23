@@ -70,8 +70,9 @@ type emulatedRecognitionResult struct {
 // executeEmulatedImageRecognition analyzes an image with the configured vision
 // backend. When the model call does not include an image_url, the gateway uses
 // the most recent user input_image in the request (so text-only upstreams like
-// opencode zen can read images the user attached).
-func executeEmulatedImageRecognition(ctx context.Context, arguments string, backend *dto.EmulatedToolBackend, requestBody []byte) emulatedRecognitionResult {
+// opencode zen can read images the user attached); when those parts were
+// stripped for this channel the pre-strip image is passed as fallbackImage.
+func executeEmulatedImageRecognition(ctx context.Context, arguments string, backend *dto.EmulatedToolBackend, requestBody []byte, fallbackImage string) emulatedRecognitionResult {
 	if backend == nil {
 		return emulatedRecognitionResult{Output: "image recognition is not configured on this channel"}
 	}
@@ -79,6 +80,9 @@ func executeEmulatedImageRecognition(ctx context.Context, arguments string, back
 	imageURL := args.ImageURL
 	if imageURL == "" {
 		imageURL = lastInputImageFromBody(requestBody)
+		if imageURL == "" {
+			imageURL = fallbackImage
+		}
 		if imageURL == "" {
 			return emulatedRecognitionResult{Output: "image recognition failed: no image provided in the call or the request"}
 		}
@@ -227,6 +231,9 @@ func imageBytesForVision(ctx context.Context, imageURL string) ([]byte, string, 
 	if err != nil {
 		return nil, "", err
 	}
+	// CDNs like upload.wikimedia.org reject default Go UA with 403
+	request.Header.Set("User-Agent", "new-api/"+common.Version+" (+https://github.com/QuantumNous/new-api)")
+	request.Header.Set("Accept", "image/png, image/jpeg, image/*")
 	response, err := service.GetSSRFProtectedHTTPClient().Do(request)
 	if err != nil {
 		return nil, "", err
@@ -273,7 +280,7 @@ func lastInputImageFromBody(body []byte) string {
 	for _, item := range input.Array() {
 		switch strings.ToLower(strings.TrimSpace(item.Get("type").String())) {
 		case "input_image":
-			if url := firstGjsonString(item, "image_url", "file_url", "url", "file"); url != "" {
+			if url := inputImageURL(item); url != "" {
 				found = url
 			}
 		case "message":
@@ -281,13 +288,23 @@ func lastInputImageFromBody(body []byte) string {
 				if strings.ToLower(strings.TrimSpace(part.Get("type").String())) != "input_image" {
 					continue
 				}
-				if url := firstGjsonString(part, "image_url", "file_url", "url", "file"); url != "" {
+				if url := inputImageURL(part); url != "" {
 					found = url
 				}
 			}
 		}
 	}
 	return found
+}
+
+// inputImageURL reads an input_image's URL from either the Responses string
+// form ("image_url": "data:...") or the chat-completions object form
+// ("image_url": {"url": ...}) that some clients and upstreams accept.
+func inputImageURL(item gjson.Result) string {
+	if url := firstGjsonString(item, "image_url", "file_url", "url", "file"); url != "" {
+		return url
+	}
+	return firstGjsonString(item.Get("image_url"), "url")
 }
 
 // geminiVisionRecognize calls a Gemini native generateContent endpoint with an

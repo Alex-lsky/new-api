@@ -591,3 +591,46 @@ func TestRunResponsesEmulationLoopImage(t *testing.T) {
 	assert.Contains(t, client, `"prompt":"a cat"`)
 	assert.Contains(t, client, "cat drawn", "final answer forwarded")
 }
+
+func TestEmulateResponsesHostedToolsStripsInputImages(t *testing.T) {
+	body := []byte(`{
+		"model": "m",
+		"input": [
+			{"type":"input_image","image_url":"https://cdn.example/a.png"},
+			{"type":"message","role":"user","content":[
+				{"type":"input_text","text":"what is this"},
+				{"type":"input_image","image_url":{"url":"https://cdn.example/b.png"},"detail":"high"}
+			]}
+		],
+		"tools": [{"type":"function","name":"shell","parameters":{"type":"object"}}]
+	}`)
+	bridge := relaycommon.NewResponsesClientToolBridge()
+	out := emulateResponsesHostedTools(body, map[string]struct{}{"image_recognition": {}}, bridge)
+
+	assert.NotContains(t, string(out), "input_image", "image parts never reach the upstream")
+	assert.NotContains(t, string(out), "cdn.example", "image URLs stripped along with the parts")
+	assert.Contains(t, string(out), recognitionStripMarker, "marker tells the model how to see the image")
+	assert.Equal(t, "https://cdn.example/b.png", bridge.AttachedImage, "most recent image kept for the executor")
+	assert.Equal(t, "function", gjson.GetBytes(out, `tools.#(name=="image_recognition").type`).String(), "recognition tool injected")
+	assert.Equal(t, "input_text", gjson.GetBytes(out, "input.0.content.0.type").String(), "bare input_image item becomes a message")
+}
+
+func TestEmulateResponsesHostedToolsKeepsImagesWithoutRecognitionEmulation(t *testing.T) {
+	body := []byte(`{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"https://cdn.example/a.png"}]}]}`)
+	out := emulateResponsesHostedTools(body, map[string]struct{}{"web_search": {}}, relaycommon.NewResponsesClientToolBridge())
+	assert.Contains(t, string(out), "input_image", "no recognition emulation: images pass through untouched")
+}
+
+func TestEmulatedCallsFromCapturedJSONWithDataURLArguments(t *testing.T) {
+	// a non-stream JSON body whose tool-call arguments embed a data: URL must
+	// not be mistaken for an SSE stream (which would drop the call and break
+	// the emulation loop)
+	info := testRelayInfoWithBridge()
+	info.ClientToolBridge.Register(emulatedRecognitionFunctionName, relaycommon.ResponsesClientToolSpec{Kind: relaycommon.ResponsesClientToolImageRecognition, Name: emulatedRecognitionFunctionName})
+	captured := []byte(`{"output":[{"type":"reasoning"},{"type":"function_call","name":"image_recognition","call_id":"c1","arguments":"{\"image_url\":\"data:image/png;base64,iVBOR\"}"}]}`)
+	calls := emulatedCallsFromCaptured(captured, info)
+	require.Len(t, calls, 1)
+	assert.Equal(t, emulatedRecognitionFunctionName, calls[0].Name)
+	assert.False(t, isLikelySSE(captured))
+	assert.True(t, isLikelySSE([]byte("event: x\ndata: {\"type\":\"response.completed\"}\n\n")), "real SSE still detected")
+}

@@ -59,7 +59,7 @@ func TestExecuteEmulatedImageRecognitionGemini(t *testing.T) {
 
 	result := executeEmulatedImageRecognition(t.Context(), `{"question":"what animal","image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{
 		Provider: dto.EmulatedRecognitionProviderGemini, APIKey: "k", APIBase: server.URL,
-	}, nil)
+	}, nil, "")
 	assert.True(t, dataURLBody, "inline image sent")
 	assert.Equal(t, "A cat.", result.Output)
 	assert.Equal(t, "A cat.", result.Summary)
@@ -82,7 +82,7 @@ func TestExecuteEmulatedImageRecognitionOpenAIVision(t *testing.T) {
 
 	result := executeEmulatedImageRecognition(t.Context(), `{"question":"what is this","image_url":"https://example.com/pic.png"}`, &dto.EmulatedToolBackend{
 		Provider: dto.EmulatedRecognitionProviderOpenAI, APIKey: "vk", APIBase: server.URL,
-	}, nil)
+	}, nil, "")
 	assert.Equal(t, "https://example.com/pic.png", gotURL)
 	assert.Equal(t, "A dog running.", result.Output)
 }
@@ -95,19 +95,19 @@ func TestExecuteEmulatedImageRecognitionFallsBackToInputImage(t *testing.T) {
 	body := []byte(`{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"},{"type":"input_image","image_url":"https://cdn.example/photo1.jpg","detail":"high"}]},{"type":"message","role":"user","content":[{"type":"input_image","image_url":"https://cdn.example/photo2.jpg"}]}]}`)
 	result := executeEmulatedImageRecognition(t.Context(), `{"question":"what is shown"}`, &dto.EmulatedToolBackend{
 		Provider: dto.EmulatedRecognitionProviderOpenAI, APIKey: "k", APIBase: server.URL,
-	}, body)
+	}, body, "")
 	assert.Equal(t, "It is a mountain.", result.Output)
 	assert.Equal(t, "https://cdn.example/photo2.jpg", lastInputImageFromBody(body), "most recent input_image selected")
 }
 
 func TestExecuteEmulatedImageRecognitionErrors(t *testing.T) {
-	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"question":"q"}`, nil, nil).Output, "not configured")
-	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"question":"q"}`, &dto.EmulatedToolBackend{Provider: dto.EmulatedRecognitionProviderOpenAI, APIKey: "k"}, nil).Output, "no image", "no image in call or request")
-	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{Provider: "nope", APIKey: "k"}, nil).Output, "unsupported provider")
+	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"question":"q"}`, nil, nil, "").Output, "not configured")
+	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"question":"q"}`, &dto.EmulatedToolBackend{Provider: dto.EmulatedRecognitionProviderOpenAI, APIKey: "k"}, nil, "").Output, "no image", "no image in call or request")
+	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{Provider: "nope", APIKey: "k"}, nil, "").Output, "unsupported provider")
 	// a channel reference without a channel id must degrade to text, never a
 	// default-endpoint network call
-	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{Provider: dto.EmulatedChannelProvider}, nil).Output, "failed")
-	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{Provider: dto.EmulatedChannelProvider, ChannelID: 0, Executor: "gemini"}, nil).Output, "failed")
+	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{Provider: dto.EmulatedChannelProvider}, nil, "").Output, "failed")
+	require.Contains(t, executeEmulatedImageRecognition(t.Context(), `{"image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{Provider: dto.EmulatedChannelProvider, ChannelID: 0, Executor: "gemini"}, nil, "").Output, "failed")
 }
 
 func TestImageForVisionRemoteDownloadAndMime(t *testing.T) {
@@ -187,7 +187,7 @@ func TestExecuteEmulatedImageRecognitionCodePlanMCP(t *testing.T) {
 	result := executeEmulatedImageRecognition(t.Context(), `{"question":"describe image","image_url":"`+testImageURL+`"}`, &dto.EmulatedToolBackend{
 		Provider: dto.EmulatedRecognitionProviderZhipuCodePlanVisionMCP,
 		APIKey:   "vision-key",
-	}, nil)
+	}, nil, "")
 	assert.Equal(t, "vision result", result.Output)
 	assert.Equal(t, "vision result", result.Summary)
 }

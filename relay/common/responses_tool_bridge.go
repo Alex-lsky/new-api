@@ -52,6 +52,11 @@ type ResponsesClientToolSpec struct {
 // native tool call items). A request that bridged nothing leaves it nil.
 type ResponsesClientToolBridge struct {
 	byChatName map[string]ResponsesClientToolSpec
+	// AttachedImage holds the most recent user input_image URL captured before
+	// input_image parts were stripped for a recognition-emulating channel; the
+	// recognition executor uses it when the model calls the tool without an
+	// image_url of its own.
+	AttachedImage string
 }
 
 func NewResponsesClientToolBridge() *ResponsesClientToolBridge {
