@@ -617,14 +617,6 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 	if info != nil && request.Reasoning != nil && request.Reasoning.Effort != "" {
 		info.SetReasoningEffort(request.Reasoning.Effort)
 	}
-	// OpenCode zen/go and similar Responses-compatible upstreams require every
-	// tool to carry a name; codex's default {"type":"web_search_preview"} is
-	// otherwise rejected with "tools[i].function: missing field `name`". This
-	// only ever adds a name where one is missing, so it is safe for every
-	// channel (native upstreams already send names and are left untouched).
-	if len(request.Tools) > 0 {
-		request.Tools = normalizeResponsesToolsMissingName(request.Tools)
-	}
 	// The two history rewrites below only target non-native Responses upstreams
 	// (CPA-proxied zen/go and other OpenAI-compatible surfaces that do not
 	// implement the full Responses spec). Native providers — OpenAI, Azure,
@@ -827,60 +819,6 @@ func isNativeResponsesUpstream(info *relaycommon.RelayInfo) bool {
 		return true
 	}
 	return false
-}
-
-// normalizeResponsesToolsMissingName fills in a sensible name for tools that
-// lack one. OpenCode zen/go and similar upstreams reject nameless tools, while
-// codex's default web_search_preview / local_shell tools may arrive without a
-// name. Tools that already carry a name (top-level or function.name) are left
-// untouched.
-func normalizeResponsesToolsMissingName(tools json.RawMessage) json.RawMessage {
-	if len(tools) == 0 {
-		return tools
-	}
-	var items []map[string]any
-	if err := json.Unmarshal(tools, &items); err != nil {
-		return tools
-	}
-	changed := false
-	for i := range items {
-		if responsesToolHasName(items[i]) {
-			continue
-		}
-		t, _ := items[i]["type"].(string)
-		items[i]["name"] = defaultResponsesToolName(strings.TrimSpace(t))
-		changed = true
-	}
-	if !changed {
-		return tools
-	}
-	data, err := json.Marshal(items)
-	if err != nil {
-		return tools
-	}
-	return data
-}
-
-func responsesToolHasName(tool map[string]any) bool {
-	if name, _ := tool["name"].(string); strings.TrimSpace(name) != "" {
-		return true
-	}
-	if fn, ok := tool["function"].(map[string]any); ok {
-		if name, _ := fn["name"].(string); strings.TrimSpace(name) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func defaultResponsesToolName(toolType string) string {
-	// web_search variants use their type as the name so multiple web_search
-	// tools do not collide into a single rejected name. local_shell maps to the
-	// codex standard tool name "shell".
-	if toolType == "local_shell" {
-		return "shell"
-	}
-	return toolType
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {

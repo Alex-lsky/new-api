@@ -85,21 +85,35 @@ func TestConvertOpenAIResponsesRequestRewritesHistoryForNonNativeUpstream(t *tes
 	}
 }
 
-// Name backfill applies to every channel: it only ever adds a name where one
-// is missing, so even native upstreams benefit without regression.
-func TestConvertOpenAIResponsesRequestBackfillsMissingToolNameForAllChannels(t *testing.T) {
+// Hosted tool declarations like {"type":"web_search"} must never gain an
+// artificial name: strict native Responses upstreams (api.openai.com, Azure,
+// and OpenAI-compatible codex surfaces reached via CPA) reject the extra field
+// with "Unknown parameter: 'tools[N].name'". zen/go-style upstreams that need
+// every tool named are covered by emulate/strip channel config, which rewrites
+// hosted declarations into named functions before the adaptor runs.
+func TestConvertOpenAIResponsesRequestNeverInjectsHostedToolNames(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	tools := []byte(`[{"type":"web_search_preview"}]`)
+	tools := []byte(`[{"type":"web_search"},{"type":"web_search_preview"},{"type":"image_generation"}]`)
 
-	a := &Adaptor{}
-	info := &relaycommon.RelayInfo{
-		ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeOpenAI},
+	for _, baseURL := range []string{
+		"https://api.openai.com",
+		"https://my-resource.openai.azure.com",
+		"http://10.0.0.104:8317",
+		"https://opencode.ai/zen/go",
+		"https://my-gateway.example.com",
+	} {
+		t.Run(baseURL, func(t *testing.T) {
+			a := &Adaptor{}
+			info := &relaycommon.RelayInfo{
+				ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeOpenAI},
+			}
+			info.ChannelBaseUrl = baseURL
+			req := dto.OpenAIResponsesRequest{Model: "gpt-test", Input: []byte(`"hi"`), Tools: tools}
+			converted, err := a.ConvertOpenAIResponsesRequest(&gin.Context{}, info, req)
+			require.NoError(t, err)
+			out, ok := converted.(dto.OpenAIResponsesRequest)
+			require.True(t, ok)
+			assert.Equal(t, string(tools), string(out.Tools), "hosted tool declarations must pass through byte-identical")
+		})
 	}
-	info.ChannelBaseUrl = "https://api.openai.com"
-	req := dto.OpenAIResponsesRequest{Model: "gpt-test", Input: []byte(`"hi"`), Tools: tools}
-	converted, err := a.ConvertOpenAIResponsesRequest(&gin.Context{}, info, req)
-	require.NoError(t, err)
-	out, ok := converted.(dto.OpenAIResponsesRequest)
-	require.True(t, ok)
-	assert.Contains(t, string(out.Tools), `"name":"web_search_preview"`)
 }

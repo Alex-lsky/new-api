@@ -338,14 +338,6 @@ func normalizeResponsesTools(raw json.RawMessage) json.RawMessage {
 			}
 			changed = true
 		}
-		if !gjson.GetBytes(result, fmt.Sprintf("%d.name", i)).Exists() {
-			var err error
-			result, err = sjson.SetBytes(result, fmt.Sprintf("%d.name", i), tool.Get("type").String())
-			if err != nil {
-				return raw
-			}
-			changed = true
-		}
 	}
 	if !changed {
 		return raw

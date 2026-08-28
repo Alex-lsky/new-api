@@ -40,6 +40,7 @@ func TestNormalizeResponsesTools(t *testing.T) {
 				assert.True(t, gjson.Get(out, "2.input_schema").Exists(), "custom tool input_schema must be preserved")
 				assert.False(t, gjson.Get(out, "2.function").Exists())
 
+				assert.False(t, gjson.Get(out, "3.name").Exists(), "nameless hosted tool passes through untouched (native Responses API rejects tools[N].name)")
 				assert.Equal(t, "web_search", gjson.Get(out, "3.type").String(), "nameless web_search passes through untouched")
 
 				assert.Equal(t, "view_image", gjson.Get(out, "4.name").String())
@@ -71,7 +72,7 @@ func TestNormalizeResponsesTools(t *testing.T) {
 			},
 		},
 		{
-			name: "nameless web_search and image_generation get type-based names",
+			name: "nameless hosted tools pass through untouched",
 			in: `[
 				{"type":"function","function":{"name":"shell","description":"Run shell","parameters":{"type":"object"}}},
 				{"type":"web_search","external_web_access":false},
@@ -80,9 +81,9 @@ func TestNormalizeResponsesTools(t *testing.T) {
 			want: func(t *testing.T, out string) {
 				assert.Equal(t, "shell", gjson.Get(out, "0.name").String())
 				assert.False(t, gjson.Get(out, "0.function").Exists())
-				assert.Equal(t, "web_search", gjson.Get(out, "1.name").String(), "nameless tool gets type as name")
+				assert.False(t, gjson.Get(out, "1.name").Exists(), "hosted web_search must not gain a name — native API rejects 'Unknown parameter: tools[N].name'")
 				assert.Equal(t, "false", gjson.Get(out, "1.external_web_access").Raw)
-				assert.Equal(t, "image_generation", gjson.Get(out, "2.name").String())
+				assert.False(t, gjson.Get(out, "2.name").Exists(), "hosted image_generation must not gain a name")
 				assert.Equal(t, "jpeg", gjson.Get(out, "2.output_format").String())
 			},
 		},
