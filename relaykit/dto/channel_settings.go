@@ -54,6 +54,15 @@ type ChannelSettings struct {
 	// backend either inlines its credentials or references a named provider of
 	// the global tool hosting module via EmulatedToolBackend.Ref.
 	EmulatedToolBackends map[string]EmulatedToolBackend `json:"emulated_tool_backends,omitempty"`
+	// RepairTextToolCallModels lists model names on this channel for which the
+	// gateway repairs textualized tool calls: some models occasionally emit a
+	// tool call as plain assistant text ("[tool call] name({json})") instead of
+	// a structured function_call item, leaving clients nothing to execute. For
+	// the listed models, a final assistant message that consists solely of such
+	// a textual call to a tool the request declared is rewritten into a real
+	// function_call item so the client executes it and the loop continues.
+	// Empty means no repair.
+	RepairTextToolCallModels []string `json:"repair_text_tool_call_models,omitempty"`
 }
 
 // Web search executor providers for EmulatedToolBackend.Provider when the
@@ -234,6 +243,27 @@ func (s *ChannelSettings) EmulateToolTypeSet() map[string]struct{} {
 	if _, ok := set["web_search_preview"]; ok {
 		delete(set, "web_search_preview")
 		set["web_search"] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+// RepairTextToolCallModelSet returns the normalized
+// repair_text_tool_call_models set. Model names are matched exactly (after
+// trimming); nil means the repair is not configured for any model.
+func (s *ChannelSettings) RepairTextToolCallModelSet() map[string]struct{} {
+	if s == nil || len(s.RepairTextToolCallModels) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(s.RepairTextToolCallModels))
+	for _, model := range s.RepairTextToolCallModels {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		set[model] = struct{}{}
 	}
 	if len(set) == 0 {
 		return nil

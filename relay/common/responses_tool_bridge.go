@@ -20,6 +20,11 @@ const (
 	// ResponsesClientToolNamespace is a client-executed namespaced tool (e.g.
 	// an MCP tool) bridged as a function with a flattened name.
 	ResponsesClientToolNamespace ResponsesClientToolKind = "namespace"
+	// ResponsesClientToolRenamed marks a plain function or custom tool whose
+	// name exceeded the upstream 64-character limit: the outbound request
+	// carries a deterministic truncated name and the response side restores
+	// the original so the client's tool registry keeps matching.
+	ResponsesClientToolRenamed ResponsesClientToolKind = "renamed"
 	// ResponsesClientToolSearch is Codex's tool_search declaration bridged as
 	// a plain function.
 	ResponsesClientToolSearch ResponsesClientToolKind = "tool_search"
@@ -140,4 +145,16 @@ func (b *ResponsesClientToolBridge) Len() int {
 		return 0
 	}
 	return len(b.byChatName)
+}
+
+// Names returns every upstream-facing function name the registry recorded.
+func (b *ResponsesClientToolBridge) Names() []string {
+	if b == nil {
+		return nil
+	}
+	names := make([]string, 0, len(b.byChatName))
+	for name := range b.byChatName {
+		names = append(names, name)
+	}
+	return names
 }

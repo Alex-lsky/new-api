@@ -296,6 +296,7 @@ const SENSITIVE_FORM_FIELDS = [
   'system_prompt_override',
   'strip_tool_types',
   'bridge_tool_types',
+  'repair_text_tool_call_models',
   'hosted_web_search',
   'hosted_image_recognition',
   'hosted_image_generation',
@@ -4403,6 +4404,32 @@ export function ChannelMutateDrawer({
                                   <FormDescription>
                                     {t(
                                       'Comma-separated OpenAI Responses tool types rewritten into ordinary function tools for function-only upstreams, and restored to native kinds on the way back. Enables client-executed tools (Codex apply_patch, MCP) on upstreams that reject them.'
+                                    )}
+                                  </FormDescription>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+
+                            <FormField
+                              control={form.control}
+                              name='repair_text_tool_call_models'
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>
+                                    {t('Repair Text Tool Call Models')}
+                                  </FormLabel>
+                                  <FormControl>
+                                    <Input
+                                      placeholder={t(
+                                        'e.g. muse-spark-1.2-contributor'
+                                      )}
+                                      {...field}
+                                    />
+                                  </FormControl>
+                                  <FormDescription>
+                                    {t(
+                                      'Comma-separated model names on this channel whose textualized tool calls ("[tool call] name({json})" written as plain message text) are rewritten into structured function_call items so clients can execute them. Leave empty to disable.'
                                     )}
                                   </FormDescription>
                                   <FormMessage />

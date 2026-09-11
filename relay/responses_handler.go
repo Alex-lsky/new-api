@@ -95,21 +95,22 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
+		// Transforms are all no-ops when their channel config is absent and
+		// nothing needs rewriting, so running them unconditionally keeps
+		// tool-name sanitization universal for passthrough channels.
 		stripToolTypes := exemptEmulatedFromStrip(info.ChannelSetting.StripToolTypeSet(), emulateBackends)
-		if stripToolTypes != nil || bridgeKinds != nil || len(emulateBackends) > 0 {
-			raw, err := storage.Bytes()
-			if err == nil {
-				transformed, changed := applyResponsesPassThroughTransforms(c, info, raw, stripToolTypes, bridgeKinds, emulateSet, emulateBackends)
-				if info.EmulatedTools != nil {
-					emulatedBaseBody = transformed
-				} else if changed {
-					body, closer, err := relaycommon.NewOutboundJSONBody(transformed)
-					if err != nil {
-						return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-					}
-					defer closer.Close()
-					requestBody = body
+		raw, rawErr := storage.Bytes()
+		if rawErr == nil {
+			transformed, changed := applyResponsesPassThroughTransforms(c, info, raw, stripToolTypes, bridgeKinds, emulateSet, emulateBackends)
+			if info.EmulatedTools != nil {
+				emulatedBaseBody = transformed
+			} else if changed {
+				body, closer, err := relaycommon.NewOutboundJSONBody(transformed)
+				if err != nil {
+					return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 				}
+				defer closer.Close()
+				requestBody = body
 			}
 		}
 		if requestBody == nil && info.EmulatedTools == nil {
@@ -160,6 +161,20 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			}
 		}
 
+		// tool names longer than 64 characters are hard-rejected by strict
+		// upstreams; truncate deterministically and restore originals on the
+		// response, before the emulation loop snapshots the outbound body
+		{
+			bridge := info.ClientToolBridge
+			if bridge == nil {
+				bridge = relaycommon.NewResponsesClientToolBridge()
+			}
+			if sanitized := sanitizeResponsesToolNames(jsonData, bridge); !bytes.Equal(sanitized, jsonData) {
+				jsonData = sanitized
+				info.ClientToolBridge = bridge
+			}
+		}
+
 		// hosted tools the gateway executes itself: rewrite the declarations
 		// into functions and remember the backends so the request runs through
 		// the emulation loop instead of a single shot
@@ -185,6 +200,25 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			defer closer.Close()
 			jsonData = nil
 			requestBody = body
+		}
+	}
+
+	// Textualized tool-call repair (channel repair_text_tool_call_models):
+	// collect every tool name the outbound request declared — the client's
+	// names plus whatever the bridge renamed them to — so the response side
+	// only repairs textual calls to tools this request actually carries.
+	if repairModels := info.ChannelSetting.RepairTextToolCallModelSet(); repairModels != nil {
+		if _, ok := repairModels[strings.TrimSpace(info.OriginModelName)]; ok {
+			toolNames := make(map[string]struct{})
+			for _, tool := range gjson.ParseBytes(request.Tools).Array() {
+				if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
+					toolNames[name] = struct{}{}
+				}
+			}
+			for _, name := range info.ClientToolBridge.Names() {
+				toolNames[name] = struct{}{}
+			}
+			info.ResponsesRepairToolNames = toolNames
 		}
 	}
 
@@ -305,6 +339,22 @@ func applyResponsesPassThroughTransforms(c *gin.Context, info *relaycommon.Relay
 			info.ClientToolBridge = bridge
 			info.EmulatedTools = emulateBackends
 			logger.LogDebug(c, "requestBody after emulate_tool_types: %s", result)
+		}
+	}
+
+	// tool names longer than 64 characters are hard-rejected by strict
+	// upstreams; truncate deterministically and restore originals on the
+	// response. Runs last so it also covers names re-introduced above.
+	{
+		bridge := info.ClientToolBridge
+		if bridge == nil {
+			bridge = relaycommon.NewResponsesClientToolBridge()
+		}
+		if sanitized := sanitizeResponsesToolNames(result, bridge); !bytes.Equal(sanitized, result) {
+			result = sanitized
+			changed = true
+			info.ClientToolBridge = bridge
+			logger.LogDebug(c, "requestBody after tool name sanitize: %s", result)
 		}
 	}
 

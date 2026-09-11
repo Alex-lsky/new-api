@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,10 +36,24 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
+	// Textualized tool-call repair (channel repair_text_tool_call_models):
+	// rewrite assistant messages that consist solely of "[tool call] name({json})"
+	// into structured function_call items, before the bridge restore so a
+	// repaired bridged tool is also restored to its native kind.
+	if info.ResponsesRepairToolNames != nil {
+		if repaired := repairTextualToolCallsBody(responseBody, info.ResponsesRepairToolNames, c); !bytes.Equal(repaired, responseBody) {
+			responseBody = repaired
+			// refresh the DTO so tool-call billing sees the repaired items
+			_ = common.Unmarshal(responseBody, &responsesResponse)
+		}
+	}
+
 	// Function-only upstreams (bridge_tool_types) spoke function tools; restore
 	// the native custom/namespace/tool_search call kinds the client declared.
 	if info.ClientToolBridge != nil {
 		responseBody = restoreBridgedResponsesOutput(responseBody, info.ClientToolBridge)
+		// refresh the DTO so tool-call billing sees restored original names
+		_ = common.Unmarshal(responseBody, &responsesResponse)
 	}
 
 	// OpenCode zen/go strips the reasoning item from DeepSeek thinking-mode
@@ -132,7 +147,29 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		streamBridge = newResponsesStreamToolBridge(info.ClientToolBridge)
 	}
 
-	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+	// Textualized tool-call repair (channel repair_text_tool_call_models):
+	// message events are held back until the leading text disproves the
+	// "[tool call]" signature; confirmed textual calls are replaced by a
+	// synthetic function_call sequence. Held/synthetic events re-enter this
+	// same pipeline so backfill bookkeeping and the bridge restore apply to
+	// them like to native events.
+	var textRepair *responsesStreamTextRepair
+	if info.ResponsesRepairToolNames != nil {
+		textRepair = newResponsesStreamTextRepair(info.ResponsesRepairToolNames)
+	}
+
+	var processEvent func(data string, sr *helper.StreamResult)
+	processEvent = func(data string, sr *helper.StreamResult) {
+		if textRepair != nil {
+			transformed, preEvents, forward := textRepair.processEvent([]byte(data), c)
+			for _, pre := range preEvents {
+				processEvent(string(pre), sr)
+			}
+			if !forward {
+				return
+			}
+			data = string(transformed)
+		}
 
 		// 检查当前数据是否包含 completed 状态和 usage 信息
 		var streamResponse dto.ResponsesStreamResponse
@@ -365,6 +402,10 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				}
 			}
 		}
+	}
+
+	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+		processEvent(data, sr)
 	})
 
 	if usage.CompletionTokens == 0 {

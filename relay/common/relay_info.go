@@ -186,6 +186,14 @@ type RelayInfo struct {
 	// they run through the emulation loop instead of a single upstream shot.
 	EmulatedTools map[string]*dto.EmulatedToolBackend
 
+	// ResponsesRepairToolNames holds every tool name the outbound Responses
+	// request declared (client names plus bridge-rewritten names) when
+	// textualized tool-call repair is enabled for this model
+	// (ChannelSettings.RepairTextToolCallModels). Non-nil means the response
+	// side rewrites assistant messages that consist solely of a
+	// "[tool call] name({json})" text into a structured function_call item.
+	ResponsesRepairToolNames map[string]struct{}
+
 	// convOptions caches the converter settings snapshot (see ConvOptions).
 	convOptions *convmeta.Options
 
@@ -251,6 +259,7 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 	// previous channel; the request build re-populates it when bridging applies.
 	info.ClientToolBridge = nil
 	info.EmulatedTools = nil
+	info.ResponsesRepairToolNames = nil
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || channelMeta.ChannelSetting.PassThroughBodyEnabled {
 		info.ReasoningEffort = ""
 	} else {

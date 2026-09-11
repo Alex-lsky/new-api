@@ -69,6 +69,8 @@ func restoreBridgedOutputItem(item map[string]any, bridge *relaycommon.Responses
 	case relaycommon.ResponsesClientToolNamespace:
 		item["name"] = spec.Name
 		item["namespace"] = spec.Namespace
+	case relaycommon.ResponsesClientToolRenamed:
+		item["name"] = spec.Name
 	default:
 		return false
 	}

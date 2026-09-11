@@ -75,6 +75,29 @@ func TestRestoreBridgedResponsesOutputNothingToRestore(t *testing.T) {
 	assert.Equal(t, string(body), string(restoreBridgedResponsesOutput(body, testBridge())))
 }
 
+func TestRestoreRenamedFunctionCall(t *testing.T) {
+	long := "mcp__codex_apps__codex_document_control___execute_document_command"
+	short := long[:50] + "__0123456789ab"
+	bridge := relaycommon.NewResponsesClientToolBridge()
+	require.True(t, bridge.Register(short, relaycommon.ResponsesClientToolSpec{Kind: relaycommon.ResponsesClientToolRenamed, Name: long}))
+
+	body := []byte(`{"output":[{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"` + short + `","arguments":"{}"}]}`)
+	out := restoreBridgedResponsesOutput(body, bridge)
+	assert.Equal(t, "function_call", gjson.GetBytes(out, "output.0.type").String(), "renamed tools keep the function_call kind")
+	assert.Equal(t, long, gjson.GetBytes(out, "output.0.name").String())
+	assert.Equal(t, "call_1", gjson.GetBytes(out, "output.0.call_id").String())
+
+	s := newResponsesStreamToolBridge(bridge)
+	added, _, forward := s.transformEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":"call_1","name":"` + short + `"}}`))
+	require.True(t, forward)
+	assert.Equal(t, long, gjson.GetBytes(added, "item.name").String())
+	assert.Equal(t, "function_call", gjson.GetBytes(added, "item.type").String())
+
+	argsDelta, _, forward := s.transformEvent([]byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{}"}`))
+	require.True(t, forward, "renamed function arguments still stream normally")
+	assert.Contains(t, string(argsDelta), `"delta":"{}"`)
+}
+
 func TestStreamToolBridgeCustomToolEvents(t *testing.T) {
 	s := newResponsesStreamToolBridge(testBridge())
 

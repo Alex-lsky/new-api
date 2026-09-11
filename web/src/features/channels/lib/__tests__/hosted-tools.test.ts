@@ -163,3 +163,40 @@ describe('hosted channel tools', () => {
     ).toBe(true)
   })
 })
+
+describe('repair text tool call models', () => {
+  test('round-trips through the setting JSON and preserves model case', () => {
+    const channel = channelWithSetting({
+      repair_text_tool_call_models: [
+        'muse-spark-1.2-contributor',
+        'deepseek-v4-pro',
+      ],
+    })
+
+    const values = transformChannelToFormDefaults(channel)
+    expect(values.repair_text_tool_call_models).toBe(
+      'muse-spark-1.2-contributor,deepseek-v4-pro'
+    )
+
+    const setting = JSON.parse(
+      buildSettingJSON({
+        ...CHANNEL_FORM_DEFAULT_VALUES,
+        repair_text_tool_call_models:
+          ' muse-spark-1.2-contributor , muse-spark-1.2-contributor ',
+      })
+    )
+    expect(setting.repair_text_tool_call_models).toEqual([
+      'muse-spark-1.2-contributor',
+    ])
+  })
+
+  test('omits the setting when no model is configured', () => {
+    const setting = JSON.parse(
+      buildSettingJSON({
+        ...CHANNEL_FORM_DEFAULT_VALUES,
+        repair_text_tool_call_models: '  ',
+      })
+    )
+    expect(setting.repair_text_tool_call_models).toBeUndefined()
+  })
+})

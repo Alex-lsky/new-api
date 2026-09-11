@@ -334,6 +334,7 @@ export const channelFormSchema = z
     system_prompt_override: z.boolean().optional(),
     strip_tool_types: z.string().optional(),
     bridge_tool_types: z.string().optional(),
+    repair_text_tool_call_models: z.string().optional(),
     hosted_web_search: hostedToolSchema,
     hosted_image_recognition: hostedToolSchema,
     hosted_image_generation: hostedToolSchema,
@@ -527,6 +528,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   system_prompt_override: false,
   strip_tool_types: '',
   bridge_tool_types: '',
+  repair_text_tool_call_models: '',
   hosted_web_search: { ...defaultHostedToolValues },
   hosted_image_recognition: { ...defaultHostedToolValues },
   hosted_image_generation: { ...defaultHostedToolValues },
@@ -572,6 +574,7 @@ export function transformChannelToFormDefaults(
     system_prompt_override: false,
     strip_tool_types: '',
     bridge_tool_types: '',
+    repair_text_tool_call_models: '',
     hosted_web_search: { ...defaultHostedToolValues } as HostedToolFormValues,
     hosted_image_recognition: {
       ...defaultHostedToolValues,
@@ -614,6 +617,11 @@ export function transformChannelToFormDefaults(
           .join(','),
         bridge_tool_types: Array.isArray(parsed.bridge_tool_types)
           ? parsed.bridge_tool_types.join(',')
+          : '',
+        repair_text_tool_call_models: Array.isArray(
+          parsed.repair_text_tool_call_models
+        )
+          ? parsed.repair_text_tool_call_models.join(',')
           : '',
         hosted_web_search: hostedToolFromSettings(
           stripList,
@@ -809,6 +817,19 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
   ]
   if (bridgeToolTypes.length > 0) {
     settingObj.bridge_tool_types = bridgeToolTypes
+  }
+
+  // model names are matched case-sensitively, so preserve the given case
+  const repairTextToolCallModels = [
+    ...new Set(
+      String(formData.repair_text_tool_call_models || '')
+        .split(',')
+        .map((model) => model.trim())
+        .filter(Boolean)
+    ),
+  ]
+  if (repairTextToolCallModels.length > 0) {
+    settingObj.repair_text_tool_call_models = repairTextToolCallModels
   }
 
   if (emulateToolTypes.length > 0) {

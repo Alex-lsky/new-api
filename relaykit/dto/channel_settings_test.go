@@ -810,3 +810,21 @@ func TestChannelSettingsEmulatedRefBackend(t *testing.T) {
 		},
 	}).ValidateEmulatedTools(), "relaykit preserves generic channel-backed validation independently of root credential policy")
 }
+
+func TestRepairTextToolCallModelSet(t *testing.T) {
+	var nilSettings *ChannelSettings
+	assert.Nil(t, nilSettings.RepairTextToolCallModelSet())
+
+	empty := &ChannelSettings{}
+	assert.Nil(t, empty.RepairTextToolCallModelSet())
+
+	blank := &ChannelSettings{RepairTextToolCallModels: []string{"  ", ""}}
+	assert.Nil(t, blank.RepairTextToolCallModelSet())
+
+	configured := &ChannelSettings{RepairTextToolCallModels: []string{" muse-spark-1.2-contributor ", "deepseek-v4-pro"}}
+	set := configured.RepairTextToolCallModelSet()
+	assert.Len(t, set, 2)
+	assert.Contains(t, set, "muse-spark-1.2-contributor")
+	assert.Contains(t, set, "deepseek-v4-pro")
+	assert.NotContains(t, set, "Muse-Spark-1.2-Contributor", "model names match case-sensitively")
+}
