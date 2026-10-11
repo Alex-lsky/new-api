@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -18,32 +19,51 @@ const (
 	chatFinishReasonLength        = "length"
 	chatFinishReasonContentFilter = "content_filter"
 
-	responsesEventCreated                  = "response.created"
-	responsesEventCompleted                = "response.completed"
-	responsesEventIncomplete               = "response.incomplete"
-	responsesEventOutputTextDelta          = "response.output_text.delta"
-	responsesEventOutputItemAdded          = "response.output_item.added"
-	responsesEventOutputItemDone           = "response.output_item.done"
-	responsesEventFunctionArgsDelta        = "response.function_call_arguments.delta"
-	responsesEventFunctionArgsDone         = "response.function_call_arguments.done"
-	responsesEventCustomToolInputDelta     = "response.custom_tool_call_input.delta"
-	responsesEventCustomToolInputDone      = "response.custom_tool_call_input.done"
-	responsesEventReasoningSummaryDelta    = "response.reasoning_summary_text.delta"
-	responsesEventReasoningSummaryDone     = "response.reasoning_summary_text.done"
-	responsesOutputTypeFunctionCall        = "function_call"
-	responsesOutputTypeCustomToolCall      = "custom_tool_call"
-	responsesOutputTypeToolSearchCall      = "tool_search_call"
-	responsesOutputTypeMessage             = "message"
-	responsesOutputTypeReasoning           = "reasoning"
-	responsesIncompleteReasonContentFilter = "content_filter"
-	responsesIncompleteReasonMaxTokens     = "max_output_tokens"
+	responsesEventCreated                   = "response.created"
+	responsesEventCompleted                 = "response.completed"
+	responsesEventIncomplete                = "response.incomplete"
+	responsesEventOutputTextDelta           = "response.output_text.delta"
+	responsesEventOutputTextAnnotationAdded = "response.output_text.annotation.added"
+	responsesEventOutputItemAdded           = "response.output_item.added"
+	responsesEventOutputItemDone            = "response.output_item.done"
+	responsesEventFunctionArgsDelta         = "response.function_call_arguments.delta"
+	responsesEventFunctionArgsDone          = "response.function_call_arguments.done"
+	responsesEventCustomToolInputDelta      = "response.custom_tool_call_input.delta"
+	responsesEventCustomToolInputDone       = "response.custom_tool_call_input.done"
+	responsesEventReasoningSummaryPartAdded = "response.reasoning_summary_part.added"
+	responsesEventReasoningSummaryDelta     = "response.reasoning_summary_text.delta"
+	responsesEventReasoningSummaryDone      = "response.reasoning_summary_text.done"
+	responsesEventReasoningSummaryPartDone  = "response.reasoning_summary_part.done"
+	responsesOutputTypeFunctionCall         = "function_call"
+	responsesOutputTypeCustomToolCall       = "custom_tool_call"
+	responsesOutputTypeToolSearchCall       = "tool_search_call"
+	responsesOutputTypeMessage              = "message"
+	responsesOutputTypeReasoning            = "reasoning"
+	responsesIncompleteReasonContentFilter  = "content_filter"
+	responsesIncompleteReasonMaxTokens      = "max_output_tokens"
 )
 
 func ChatCompletionsResponseToResponsesResponse(resp *dto.OpenAITextResponse, id string) (*dto.OpenAIResponsesResponse, *dto.Usage, error) {
-	return ChatCompletionsResponseToResponsesResponseWithContext(resp, id, nil)
+	return ChatCompletionsResponseToResponsesResponseWithToolsAndBridge(resp, id, nil, nil)
 }
 
+// ChatCompletionsResponseToResponsesResponseWithContext restores bridged
+// tool_search calls recorded by the request-side chat bridge.
 func ChatCompletionsResponseToResponsesResponseWithContext(resp *dto.OpenAITextResponse, id string, bridge *convmeta.ResponsesChatBridgeContext) (*dto.OpenAIResponsesResponse, *dto.Usage, error) {
+	return ChatCompletionsResponseToResponsesResponseWithToolsAndBridge(resp, id, nil, bridge)
+}
+
+// ChatCompletionsResponseToResponsesResponseWithTools also restores function
+// calls that tools marks as Responses custom tools into custom_tool_call items.
+func ChatCompletionsResponseToResponsesResponseWithTools(resp *dto.OpenAITextResponse, id string, tools *convmeta.ResponsesToolState) (*dto.OpenAIResponsesResponse, *dto.Usage, error) {
+	return ChatCompletionsResponseToResponsesResponseWithToolsAndBridge(resp, id, tools, nil)
+}
+
+// ChatCompletionsResponseToResponsesResponseWithToolsAndBridge combines the
+// ToolState-based custom/namespace restoration with the chat-bridge based
+// tool_search restoration.
+func ChatCompletionsResponseToResponsesResponseWithToolsAndBridge(resp *dto.OpenAITextResponse, id string, tools *convmeta.ResponsesToolState, bridge *convmeta.ResponsesChatBridgeContext) (*dto.OpenAIResponsesResponse, *dto.Usage, error) {
+
 	if resp == nil {
 		return nil, nil, errors.New("response is nil")
 	}
@@ -52,7 +72,7 @@ func ChatCompletionsResponseToResponsesResponseWithContext(resp *dto.OpenAITextR
 	out := &dto.OpenAIResponsesResponse{
 		ID:        id,
 		Object:    "response",
-		CreatedAt: chatCreatedAt(resp.Created),
+		CreatedAt: dto.IntValue(chatCreatedAt(resp.Created)),
 		Status:    []byte(`"completed"`),
 		Model:     resp.Model,
 		Output:    make([]dto.ResponsesOutput, 0),
@@ -69,7 +89,24 @@ func ChatCompletionsResponseToResponsesResponseWithContext(resp *dto.OpenAITextR
 		out.IncompleteDetails = details
 	}
 
+	if reasoning := choice.Message.GetReasoningContent(); reasoning != "" {
+		out.Output = append(out.Output, dto.ResponsesOutput{
+			Type:   responsesOutputTypeReasoning,
+			ID:     fmt.Sprintf("%s_reasoning_0", id),
+			Status: responseOutputStatus(out),
+			Summary: []dto.ResponsesReasoningSummaryPart{
+				{
+					Type: "summary_text",
+					Text: reasoning,
+				},
+			},
+		})
+	}
 	if text := choice.Message.StringContent(); text != "" {
+		annotations, err := chatAnnotationsToResponses(choice.Message.Annotations)
+		if err != nil {
+			return nil, nil, err
+		}
 		out.Output = append(out.Output, dto.ResponsesOutput{
 			Type:   responsesOutputTypeMessage,
 			ID:     fmt.Sprintf("%s_msg_0", id),
@@ -79,27 +116,17 @@ func ChatCompletionsResponseToResponsesResponseWithContext(resp *dto.OpenAITextR
 				{
 					Type:        "output_text",
 					Text:        text,
-					Annotations: []interface{}{},
-				},
-			},
-		})
-	}
-	if reasoning := choice.Message.GetReasoningContent(); reasoning != "" {
-		out.Output = append(out.Output, dto.ResponsesOutput{
-			Type:   responsesOutputTypeReasoning,
-			ID:     fmt.Sprintf("%s_reasoning_0", id),
-			Status: responseOutputStatus(out),
-			Content: []dto.ResponsesOutputContent{
-				{
-					Type: "summary_text",
-					Text: reasoning,
+					Annotations: annotations,
 				},
 			},
 		})
 	}
 
 	for i, toolCall := range choice.Message.ParseToolCalls() {
-		toolOutput, err := chatToolCallToResponsesOutput(toolCall, id, i, responseOutputStatus(out), bridge)
+		if (toolCall.Type == "" || toolCall.Type == "function") && strings.TrimSpace(toolCall.Function.Name) == "" {
+			continue
+		}
+		toolOutput, err := chatToolCallToResponsesOutput(toolCall, id, i, responseOutputStatus(out), tools, bridge)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -107,6 +134,33 @@ func ChatCompletionsResponseToResponsesResponseWithContext(resp *dto.OpenAITextR
 	}
 
 	return out, usage, nil
+}
+
+func chatAnnotationsToResponses(raw []byte) ([]any, error) {
+	if len(raw) == 0 {
+		return []any{}, nil
+	}
+	var annotations []map[string]any
+	if err := kitutil.Unmarshal(raw, &annotations); err != nil {
+		return nil, fmt.Errorf("invalid Chat annotations: %w", err)
+	}
+	converted := make([]any, 0, len(annotations))
+	for _, annotation := range annotations {
+		if strings.TrimSpace(kitutil.Interface2String(annotation["type"])) != "url_citation" {
+			converted = append(converted, annotation)
+			continue
+		}
+		citation, ok := annotation["url_citation"].(map[string]any)
+		if !ok {
+			converted = append(converted, annotation)
+			continue
+		}
+		flattened := make(map[string]any, len(citation)+1)
+		flattened["type"] = "url_citation"
+		maps.Copy(flattened, citation)
+		converted = append(converted, flattened)
+	}
+	return converted, nil
 }
 
 func ResponsesStatusFromChatFinishReason(finishReason string) (string, *dto.IncompleteDetails) {
@@ -192,7 +246,7 @@ func responseStatusString(resp *dto.OpenAIResponsesResponse) string {
 	return strings.TrimSpace(status)
 }
 
-func chatToolCallToResponsesOutput(toolCall dto.ToolCallRequest, responseID string, index int, status string, bridge *convmeta.ResponsesChatBridgeContext) (dto.ResponsesOutput, error) {
+func chatToolCallToResponsesOutput(toolCall dto.ToolCallRequest, responseID string, index int, status string, tools *convmeta.ResponsesToolState, bridge *convmeta.ResponsesChatBridgeContext) (dto.ResponsesOutput, error) {
 	callID := strings.TrimSpace(toolCall.ID)
 	if callID == "" {
 		callID = fmt.Sprintf("%s_call_%d", responseID, index)
@@ -203,19 +257,19 @@ func chatToolCallToResponsesOutput(toolCall dto.ToolCallRequest, responseID stri
 			return dto.ResponsesOutput{}, errors.New("chat tool call is missing function name")
 		}
 		// When this Responses request was bridged through chat, restore the
-		// native Responses output type from the recorded tool spec. Unknown
-		// names fall through to a plain function_call.
+		// native Responses output type from the recorded tool spec; the spec
+		// keeps the original long names that lossy flattening hashed away.
+		// Unknown names fall through to the ToolState-based restoration below.
 		if spec, ok := bridge.Lookup(name); ok {
 			switch spec.Kind {
 			case convmeta.ResponsesChatToolCustom:
-				input := customToolInputFromChatArguments(toolCall.Function.Arguments)
 				return dto.ResponsesOutput{
 					Type:   responsesOutputTypeCustomToolCall,
 					ID:     "ctc_" + callID,
 					Status: status,
 					CallId: callID,
 					Name:   spec.Name,
-					Input:  &input,
+					Input:  chatArgumentsRawMessage(customToolInputFromArguments(toolCall.Function.Arguments)),
 				}, nil
 			case convmeta.ResponsesChatToolSearch:
 				return dto.ResponsesOutput{
@@ -238,12 +292,25 @@ func chatToolCallToResponsesOutput(toolCall dto.ToolCallRequest, responseID stri
 				}, nil
 			}
 		}
+		namespace, name := tools.ResponsesToolName(toolCall.Function.Name)
+		if tools.IsCustomTool(toolCall.Function.Name) {
+			return dto.ResponsesOutput{
+				Type:      responsesOutputTypeCustomToolCall,
+				ID:        callID,
+				Status:    status,
+				CallId:    callID,
+				Name:      name,
+				Namespace: namespace,
+				Input:     chatArgumentsRawMessage(customToolInputFromArguments(toolCall.Function.Arguments)),
+			}, nil
+		}
 		return dto.ResponsesOutput{
 			Type:      responsesOutputTypeFunctionCall,
 			ID:        callID,
 			Status:    status,
 			CallId:    callID,
-			Name:      toolCall.Function.Name,
+			Name:      name,
+			Namespace: namespace,
 			Arguments: chatArgumentsRawMessage(toolCall.Function.Arguments),
 		}, nil
 	}
@@ -256,21 +323,26 @@ func chatToolCallToResponsesOutput(toolCall dto.ToolCallRequest, responseID stri
 	}, nil
 }
 
-// customToolInputFromChatArguments unwraps the {"input": ...} envelope the
-// request converter wraps custom tool calls in, returning the raw string the
-// custom tool expects. Malformed/non-object arguments fall back to the raw
-// argument string so no tool input is ever silently dropped.
-func customToolInputFromChatArguments(arguments string) string {
-	if strings.TrimSpace(arguments) == "" {
-		return ""
+// customToolInputFromArguments unwraps the raw custom tool input from the
+// {"input": ...} arguments a Chat function call carries. Arguments of any other
+// shape are returned unchanged so the model's output is never dropped.
+func customToolInputFromArguments(arguments string) string {
+	var value map[string]any
+	if err := kitutil.UnmarshalJsonStr(arguments, &value); err != nil {
+		return arguments
 	}
-	var values map[string]any
-	if err := kitutil.Unmarshal([]byte(arguments), &values); err == nil {
-		if input, ok := values[customToolInputField].(string); ok {
-			return input
-		}
+	input, ok := value[convmeta.CustomToolInputArgument]
+	if !ok {
+		return arguments
 	}
-	return arguments
+	if text, ok := input.(string); ok {
+		return text
+	}
+	raw, err := kitutil.Marshal(input)
+	if err != nil {
+		return arguments
+	}
+	return string(raw)
 }
 
 // toolSearchArgumentsRawMessage normalizes tool_search call arguments to the
@@ -326,5 +398,9 @@ func responsesStreamEvent(eventType string, payload dto.ResponsesStreamResponse)
 }
 
 func intPtr(v int) *int {
+	return &v
+}
+
+func stringPtr(v string) *string {
 	return &v
 }

@@ -5,6 +5,11 @@ import (
 	"github.com/QuantumNous/new-api/types"
 )
 
+const (
+	DefaultCacheRatio       = 1.0
+	DefaultCreateCacheRatio = 1.25
+)
+
 var defaultCacheRatio = map[string]float64{
 	"gemini-3-flash-preview":              0.1,
 	"gemini-3-pro-preview":                0.1,
@@ -165,7 +170,7 @@ func GetCacheRatio(name string) (float64, bool) {
 	if target, resolved := price_alias.ResolveModelAlias(name); resolved && target != name {
 		return GetCacheRatio(target)
 	}
-	return 1, false // Default to 1 if not found
+	return DefaultCacheRatio, false
 }
 
 func GetCreateCacheRatio(name string) (float64, bool) {
@@ -176,7 +181,7 @@ func GetCreateCacheRatio(name string) (float64, bool) {
 	if target, resolved := price_alias.ResolveModelAlias(name); resolved && target != name {
 		return GetCreateCacheRatio(target)
 	}
-	return 1.25, false // Default to 1.25 if not found
+	return DefaultCreateCacheRatio, false
 }
 
 func GetCacheRatioCopy() map[string]float64 {
