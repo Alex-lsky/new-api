@@ -191,6 +191,11 @@ func bridgeNamespacedToolChildren(tool gjson.Result, bridge *relaycommon.Respons
 		} else {
 			replacement["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
+		// The bridge changes only the tool shape; keep the caller's strict
+		// mode intact, including an explicit false.
+		if strict := child.Get("strict"); strict.Exists() {
+			replacement["strict"] = strict.Value()
+		}
 		if raw := marshaledTool(replacement); raw != nil {
 			out = append(out, raw)
 		}
@@ -290,6 +295,9 @@ func toolsFromToolSearchOutput(item gjson.Result, bridge *relaycommon.ResponsesC
 			replacement["parameters"] = json.RawMessage(params.Raw)
 		} else {
 			replacement["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		if strict := tool.Get("strict"); strict.Exists() {
+			replacement["strict"] = strict.Value()
 		}
 		if namespace := strings.TrimSpace(tool.Get("namespace").String()); namespace != "" {
 			replacement["name"] = flattenResponsesNamespacedToolName(namespace, name)

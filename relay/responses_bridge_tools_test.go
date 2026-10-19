@@ -1,6 +1,9 @@
 package relay
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -27,7 +30,7 @@ func TestBridgeResponsesClientToolsCodexRequest(t *testing.T) {
 			{"type":"function","name":"shell","description":"Run a command","parameters":{"type":"object"}},
 			{"type":"custom","name":"apply_patch","description":"Apply a patch to files","input_schema":{"type":"object"}},
 			{"type":"namespace","name":"mcp","tools":[
-				{"type":"function","name":"search","description":"Search docs","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}
+				{"type":"function","name":"search","description":"Search docs","parameters":{"type":"object","properties":{"q":{"type":"string"}}},"strict":false}
 			]},
 			{"type":"tool_search"},
 			{"type":"web_search","name":"web_search"}
@@ -48,6 +51,7 @@ func TestBridgeResponsesClientToolsCodexRequest(t *testing.T) {
 	assert.Equal(t, "function", seen["mcp__search"])
 	assert.Equal(t, "function", seen["tool_search"])
 	assert.Equal(t, "string", gjson.GetBytes(out, `tools.#(name=="apply_patch").parameters.properties.input.type`).String())
+	assert.False(t, gjson.GetBytes(out, `tools.#(name=="mcp__search").strict`).Bool())
 	assert.Contains(t, gjson.GetBytes(out, `tools.#(name=="apply_patch").description`).String(), "Apply a patch to files")
 
 	// history rewritten
@@ -106,7 +110,7 @@ func TestBridgeResponsesClientToolsToolSearchOutputHistory(t *testing.T) {
 		"input": [
 			{"type":"tool_search_call","call_id":"ts1","arguments":{"query":"docs"}},
 			{"type":"tool_search_output","call_id":"ts1","tools":[
-				{"type":"function","name":"fetch","namespace":"docs","description":"Fetch a doc","parameters":{"type":"object"}}
+				{"type":"function","name":"fetch","namespace":"docs","description":"Fetch a doc","parameters":{"type":"object"},"strict":true}
 			]}
 		],
 		"tools": [{"type":"tool_search"}]
@@ -121,6 +125,7 @@ func TestBridgeResponsesClientToolsToolSearchOutputHistory(t *testing.T) {
 	tools := gjson.GetBytes(out, "tools").Array()
 	require.Len(t, tools, 2)
 	assert.Equal(t, "docs__fetch", tools[1].Get("name").String())
+	assert.True(t, tools[1].Get("strict").Bool())
 	spec, ok := bridge.Lookup("docs__fetch")
 	require.True(t, ok)
 	assert.Equal(t, relaycommon.ResponsesClientToolNamespace, spec.Kind)
@@ -131,4 +136,27 @@ func TestFlattenResponsesNamespacedToolName(t *testing.T) {
 	long := flattenResponsesNamespacedToolName("a-very-long-namespace-name-exceeding-the-limit", "and-a-very-long-tool-name-too")
 	require.LessOrEqual(t, len(long), 64)
 	assert.NotEqual(t, "a-very-long-namespace-name-exceeding-the-limit__and-a-very-long-tool-name-too", long, "long names must be truncated with a hash suffix")
+}
+
+func TestBridgeResponsesClientToolsPreservesCapturedMagpieStrictFalse(t *testing.T) {
+	dir := os.Getenv("SERVER104_CHAIN_DIR")
+	if dir == "" {
+		t.Skip("captured-fixture regression is explicit-only")
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "magpie-offline-outbound.json"))
+	require.NoError(t, err)
+
+	bridge := relaycommon.NewResponsesClientToolBridge()
+	out := bridgeResponsesClientTools(body, bridgeAllKinds(), bridge)
+
+	spawn := gjson.GetBytes(out, `tools.#(name=="multi_agent_v1__spawn_agent")`)
+	require.True(t, spawn.Exists(), "bridged spawn_agent must exist")
+	assert.False(t, spawn.Get("strict").Bool())
+	assert.True(t, spawn.Get("strict").Exists(), "explicit strict:false must not be dropped")
+	assert.True(t, strings.Contains(spawn.Get("parameters").Raw, `"reasoning_effort"`))
+	spec, ok := bridge.Lookup("multi_agent_v1__spawn_agent")
+	require.True(t, ok)
+	assert.Equal(t, relaycommon.ResponsesClientToolNamespace, spec.Kind)
+	assert.Equal(t, "multi_agent_v1", spec.Namespace)
+	assert.Equal(t, "spawn_agent", spec.Name)
 }
